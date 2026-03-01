@@ -63,18 +63,17 @@ export async function middleware(request: NextRequest) {
 
   const { data: { session } } = await supabase.auth.getSession();
 
+  const publicRoutes = ['/login', '/auth/callback', '/reset-password'];
+  const isPublicRoute = publicRoutes.some(route => request.nextUrl.pathname.startsWith(route));
+
   // Proteção de rotas /app
   if (request.nextUrl.pathname.startsWith('/app')) {
     if (!session) {
       return NextResponse.redirect(new URL('/login', request.url));
     }
-
-    // Verificar se é admin (opcional: podes ter uma tabela 'admins' ou usar metadados)
-    // Para este MVP, vamos assumir que qualquer user autenticado no Supabase pode entrar
-    // mas podes adicionar uma query aqui para validar na tabela 'admins'.
   }
 
-  // Redirecionar se já estiver logado
+  // Redirecionar se já estiver logado (apenas para login, pois callback/reset precisam processar tokens)
   if (request.nextUrl.pathname === '/login' && session) {
     return NextResponse.redirect(new URL('/app', request.url));
   }
@@ -83,5 +82,5 @@ export async function middleware(request: NextRequest) {
 }
 
 export const config = {
-  matcher: ['/app/:path*', '/login'],
+  matcher: ['/app/:path*', '/login', '/auth/callback', '/reset-password'],
 };
