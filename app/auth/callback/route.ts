@@ -1,32 +1,20 @@
-import { NextResponse } from 'next/server'
-import { createServerClient } from '@supabase/ssr'
+import { createClient } from '@/lib/supabase/server';
+import { NextResponse } from 'next/server';
 
 export async function GET(request: Request) {
-  const url = new URL(request.url)
-  const code = url.searchParams.get('code')
+  const { searchParams, origin } = new URL(request.url);
+  const code = searchParams.get('code');
+  // if "next" is in search params, use it as the redirection URL
+  const next = searchParams.get('next') ?? '/app';
 
-  let response = NextResponse.redirect(new URL('/app', url.origin))
-
-  if (!code) return NextResponse.redirect(new URL('/login', url.origin))
-
-  const supabase = createServerClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
-    {
-      cookies: {
-        get() {
-          return undefined
-        },
-        set(name, value, options) {
-          response.cookies.set({ name, value, ...options })
-        },
-        remove(name, options) {
-          response.cookies.set({ name, value: '', ...options, maxAge: 0 })
-        },
-      },
+  if (code) {
+    const supabase = createClient();
+    const { error } = await supabase.auth.exchangeCodeForSession(code);
+    if (!error) {
+      return NextResponse.redirect(`${origin}${next}`);
     }
-  )
+  }
 
-  await supabase.auth.exchangeCodeForSession(code)
-  return response
+  // return the user to an error page with instructions
+  return NextResponse.redirect(`${origin}/login?error=auth_callback_failed`);
 }
