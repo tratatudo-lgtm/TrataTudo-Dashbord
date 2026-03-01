@@ -8,12 +8,14 @@ import {
   MessageSquare, 
   Settings, 
   LogOut,
-  Bot
+  Bot,
+  Zap
 } from 'lucide-react';
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
 import { createClient } from '@/lib/supabase/client';
 import { useRouter } from 'next/navigation';
+import { useNotifications } from './notification-provider';
 
 function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
@@ -30,10 +32,27 @@ export function Sidebar() {
   const pathname = usePathname();
   const router = useRouter();
   const supabase = createClient();
+  const { addNotification } = useNotifications();
 
   const handleLogout = async () => {
     await supabase.auth.signOut();
     router.push('/login');
+  };
+
+  const simulateTrialEnd = () => {
+    addNotification({
+      title: 'Trial a Terminar',
+      message: 'O trial do cliente "João Silva" termina em 24 horas. Contacte-o para conversão.',
+      type: 'warning'
+    });
+  };
+
+  const simulateApiError = () => {
+    addNotification({
+      title: 'Erro na Evolution API',
+      message: 'A instância "Bot-01" perdeu a ligação. Verifique o estado do servidor.',
+      type: 'error'
+    });
   };
 
   return (
@@ -67,9 +86,30 @@ export function Sidebar() {
             </Link>
           );
         })}
+
+        <div className="pt-4 pb-2 px-3">
+          <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Simulação</p>
+        </div>
+        
+        <button
+          onClick={simulateTrialEnd}
+          className="flex w-full items-center rounded-lg px-3 py-2 text-sm font-medium text-slate-600 transition hover:bg-amber-50 hover:text-amber-700"
+        >
+          <Zap className="mr-3 h-4 w-4 text-amber-500" />
+          Fim de Trial
+        </button>
+        
+        <button
+          onClick={simulateApiError}
+          className="flex w-full items-center rounded-lg px-3 py-2 text-sm font-medium text-slate-600 transition hover:bg-red-50 hover:text-red-700"
+        >
+          <Zap className="mr-3 h-4 w-4 text-red-500" />
+          Erro de API
+        </button>
       </nav>
 
       <div className="border-t border-slate-200 p-4">
+
         <button
           onClick={handleLogout}
           className="flex w-full items-center rounded-lg px-3 py-2 text-sm font-medium text-slate-600 transition hover:bg-rose-50 hover:text-rose-700"

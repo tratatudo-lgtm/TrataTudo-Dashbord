@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { Calendar, Phone, Building2, Bot, History, Save, Loader2, Zap } from 'lucide-react';
+import { Calendar, Phone, Building2, Bot, History, Save, Loader2, Zap, ShieldCheck, FileText, Clock } from 'lucide-react';
 import { createClient } from '@/lib/supabase/client';
 import { useRouter } from 'next/navigation';
 
@@ -16,6 +16,7 @@ export default function ClientDetailsPage({
   const [saving, setSaving] = useState(false);
   const [activating, setActivating] = useState(false);
   const [systemPrompt, setSystemPrompt] = useState('');
+  const [internalNotes, setInternalNotes] = useState('');
   const [status, setStatus] = useState('');
   const router = useRouter();
   const supabase = createClient();
@@ -31,6 +32,7 @@ export default function ClientDetailsPage({
       if (clientData) {
         setClient(clientData);
         setSystemPrompt(clientData.system_prompt || '');
+        setInternalNotes(clientData.internal_notes || '');
         setStatus(clientData.status || '');
 
         const { data: messages } = await supabase
@@ -56,6 +58,7 @@ export default function ClientDetailsPage({
         body: JSON.stringify({
           id: params.id,
           system_prompt: systemPrompt,
+          internal_notes: internalNotes,
           status: status,
         }),
       });
@@ -97,6 +100,10 @@ export default function ClientDetailsPage({
 
   if (loading) return <div className="flex h-64 items-center justify-center"><Loader2 className="h-8 w-8 animate-spin text-indigo-600" /></div>;
   if (!client) return <div>Cliente não encontrado.</div>;
+
+  const lastInteraction = recentMessages && recentMessages.length > 0 
+    ? new Date(recentMessages[0].created_at).toLocaleString('pt-PT')
+    : 'Nenhuma interação registada';
 
   return (
     <div className="max-w-5xl">
@@ -207,8 +214,55 @@ export default function ClientDetailsPage({
               <option value="expired">Expirado</option>
             </select>
           </div>
+
+          {/* Nova Secção: Informações Adicionais */}
+          <div className="rounded-2xl bg-white p-8 shadow-sm">
+            <h2 className="mb-6 text-lg font-semibold flex items-center gap-2">
+              <ShieldCheck className="h-5 w-5 text-indigo-600" />
+              Informações Adicionais
+            </h2>
+            
+            <div className="space-y-6">
+              <div className="space-y-2">
+                <div className="flex items-center gap-2 text-xs font-semibold text-slate-500 uppercase tracking-wider">
+                  <Clock className="h-3 w-3" />
+                  Última Interação
+                </div>
+                <p className="text-sm text-slate-900 bg-slate-50 p-2 rounded border border-slate-100">
+                  {lastInteraction}
+                </p>
+              </div>
+
+              <div className="space-y-2">
+                <div className="flex items-center gap-2 text-xs font-semibold text-slate-500 uppercase tracking-wider">
+                  <ShieldCheck className="h-3 w-3" />
+                  Dados de Acesso (Evolution)
+                </div>
+                <div className="text-[10px] font-mono text-slate-600 bg-slate-900 p-3 rounded-lg border border-slate-800 break-all">
+                  <p className="text-indigo-400 mb-1">Instance Name:</p>
+                  <p className="mb-2">{client.name.toLowerCase().replace(/\s+/g, '_')}</p>
+                  <p className="text-indigo-400 mb-1">API Key:</p>
+                  <p className="text-slate-400">••••••••••••••••••••</p>
+                </div>
+              </div>
+
+              <div className="space-y-2">
+                <div className="flex items-center gap-2 text-xs font-semibold text-slate-500 uppercase tracking-wider">
+                  <FileText className="h-3 w-3" />
+                  Notas Internas
+                </div>
+                <textarea
+                  className="w-full h-32 rounded-lg border border-slate-300 p-3 text-sm focus:border-indigo-500 focus:ring-indigo-500"
+                  placeholder="Adicione notas sobre este cliente..."
+                  value={internalNotes}
+                  onChange={(e) => setInternalNotes(e.target.value)}
+                />
+              </div>
+            </div>
+          </div>
         </div>
       </div>
     </div>
   );
 }
+
