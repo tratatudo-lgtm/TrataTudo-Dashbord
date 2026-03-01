@@ -2,6 +2,8 @@ import { createClient } from '@/lib/supabase/server';
 import { StatsCard } from '@/components/stats-card';
 import { Users, MessageSquare, Clock, AlertCircle } from 'lucide-react';
 
+export const dynamic = 'force-dynamic';
+
 export default async function DashboardPage() {
   const supabase = createClient();
 

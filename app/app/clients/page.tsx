@@ -3,6 +3,8 @@ import Link from 'next/link';
 import { Edit2, ExternalLink } from 'lucide-react';
 import { ClientActionButtons } from '@/components/clients/client-action-buttons';
 
+export const dynamic = 'force-dynamic';
+
 export default async function ClientsPage({
   searchParams,
 }: {

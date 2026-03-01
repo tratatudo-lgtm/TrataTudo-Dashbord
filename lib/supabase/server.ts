@@ -3,10 +3,16 @@ import { cookies } from 'next/headers';
 
 export function createClient() {
   const cookieStore = cookies();
+  const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
+  const key = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+
+  if (!url || !key) {
+    console.warn('Supabase server env vars missing.');
+  }
 
   return createServerClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
+    url || 'https://placeholder.supabase.co',
+    key || 'placeholder',
     {
       cookies: {
         get(name: string) {
