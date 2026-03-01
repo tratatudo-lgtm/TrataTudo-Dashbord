@@ -1,0 +1,5 @@
+{
+  "name": "TrataTudo Dashboard",
+  "description": "Dashboard para gestão de clientes trial de bots WhatsApp com IA (Groq) e Evolution API.",
+  "requestFramePermissions": []
+}
