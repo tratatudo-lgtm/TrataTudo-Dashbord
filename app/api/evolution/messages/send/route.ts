@@ -11,10 +11,12 @@ export async function POST(request: Request) {
   }
 
   try {
-    const { instanceName, phone, text } = await request.json();
+    const body = await request.json();
+    const { instanceName, text } = body;
+    const phone = body.phone || body.number;
     
     if (!instanceName || !phone || !text) {
-      throw new Error('Instância, telefone e texto são obrigatórios');
+      throw new Error('Instância, telefone (phone ou number) e texto são obrigatórios');
     }
 
     const result = await sendEvolutionMessage(instanceName, phone, text);

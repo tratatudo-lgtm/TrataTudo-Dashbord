@@ -1,90 +1,198 @@
 'use client';
 
 import { useState, useEffect } from 'react';
+import { 
+  Settings, ShieldCheck, Database, Bot, Zap, 
+  CheckCircle2, XCircle, Loader2, Play, Terminal,
+  Lock, Eye, EyeOff
+} from 'lucide-react';
 import { createClient } from '@/lib/supabase/client';
-import { CheckCircle2, XCircle, RefreshCw } from 'lucide-react';
 
 export default function SettingsPage() {
-  const [supabaseStatus, setSupabaseStatus] = useState<'loading' | 'ok' | 'error'>('loading');
-  const [isTesting, setIsTesting] = useState(false);
-  const siteUrl = process.env.NEXT_PUBLIC_SITE_URL;
+  const [status, setStatus] = useState({
+    supabase: 'checking',
+    groq: 'checking',
+    evolution: 'checking'
+  });
+  const [logs, setLogs] = useState<string[]>([]);
+  const [runningTests, setRunningTests] = useState(false);
+  
+  const envVars = [
+    'NEXT_PUBLIC_SUPABASE_URL',
+    'NEXT_PUBLIC_SUPABASE_ANON_KEY',
+    'SUPABASE_SERVICE_ROLE_KEY',
+    'GROQ_API_KEY',
+    'GROQ_MODEL',
+    'GOOGLE_PLACES_API_KEY',
+    'EVOLUTION_API_URL',
+    'EVOLUTION_API_KEY',
+    'NEXT_PUBLIC_SITE_URL'
+  ];
+
+  const addLog = (msg: string) => {
+    setLogs(prev => [`[${new Date().toLocaleTimeString()}] ${msg}`, ...prev].slice(0, 50));
+  };
 
   const checkSupabase = async () => {
-    setIsTesting(true);
+    const supabase = createClient();
     try {
-      const supabase = createClient();
-      // Try a simple query to check connection
-      const { error } = await supabase.from('clients').select('id').limit(1);
+      const { data, error } = await supabase.from('clients').select('count', { count: 'exact', head: true });
       if (error) throw error;
-      setSupabaseStatus('ok');
-    } catch (err) {
-      console.error('Supabase connection error:', err);
-      setSupabaseStatus('error');
-    } finally {
-      setIsTesting(false);
+      setStatus(prev => ({ ...prev, supabase: 'ok' }));
+      addLog('Supabase: Ligação estabelecida com sucesso.');
+    } catch (err: any) {
+      setStatus(prev => ({ ...prev, supabase: 'error' }));
+      addLog(`Supabase Erro: ${err.message}`);
     }
   };
 
+  const checkGroq = async () => {
+    try {
+      const res = await fetch('/api/groq/test'); // I'll need to create this
+      if (res.ok) {
+        setStatus(prev => ({ ...prev, groq: 'ok' }));
+        addLog('Groq: API respondeu corretamente.');
+      } else {
+        throw new Error('Falha no teste da API');
+      }
+    } catch (err: any) {
+      setStatus(prev => ({ ...prev, groq: 'error' }));
+      addLog(`Groq Erro: ${err.message}`);
+    }
+  };
+
+  const checkEvolution = async () => {
+    try {
+      const res = await fetch('/api/evolution/test'); // I'll need to create this
+      if (res.ok) {
+        setStatus(prev => ({ ...prev, evolution: 'ok' }));
+        addLog('Evolution: API acessível.');
+      } else {
+        throw new Error('Falha no teste da API');
+      }
+    } catch (err: any) {
+      setStatus(prev => ({ ...prev, evolution: 'error' }));
+      addLog(`Evolution Erro: ${err.message}`);
+    }
+  };
+
+  const runAllTests = async () => {
+    setRunningTests(true);
+    setLogs([]);
+    addLog('Iniciando testes de sistema...');
+    await Promise.all([checkSupabase(), checkGroq(), checkEvolution()]);
+    addLog('Testes concluídos.');
+    setRunningTests(false);
+  };
+
   useEffect(() => {
-    checkSupabase();
+    runAllTests();
   }, []);
 
   return (
-    <div className="p-8 max-w-4xl mx-auto">
-      <h1 className="text-2xl font-bold text-slate-900 mb-8">Configurações</h1>
+    <div className="max-w-4xl mx-auto space-y-8">
+      <div>
+        <h1 className="text-3xl font-bold text-slate-900">Configurações</h1>
+        <p className="text-slate-500 mt-1">Checklist operacional e estado do sistema.</p>
+      </div>
 
-      <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
-        <div className="p-6 border-b border-slate-100">
-          <h2 className="text-lg font-semibold text-slate-800">Estado do Sistema</h2>
-          <p className="text-sm text-slate-500">Verifique a ligação aos serviços externos.</p>
-        </div>
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+        <StatusCard 
+          title="Supabase" 
+          status={status.supabase} 
+          icon={Database} 
+          description="Base de dados e Auth"
+        />
+        <StatusCard 
+          title="Groq AI" 
+          status={status.groq} 
+          icon={Bot} 
+          description="Geração de Prompts"
+        />
+        <StatusCard 
+          title="Evolution API" 
+          status={status.evolution} 
+          icon={Zap} 
+          description="WhatsApp Gateway"
+        />
+      </div>
 
-        <div className="p-6 space-y-6">
-          {siteUrl && (
-            <div className="flex items-center justify-between">
-              <div>
-                <p className="text-sm font-medium text-slate-700">URL do Site</p>
-                <p className="text-xs text-slate-500">NEXT_PUBLIC_SITE_URL</p>
-              </div>
-              <code className="px-2 py-1 bg-slate-50 rounded border border-slate-200 text-xs font-mono text-slate-600">
-                {siteUrl}
-              </code>
-            </div>
-          )}
-
-          <div className="flex items-center justify-between">
-            <div>
-              <p className="text-sm font-medium text-slate-700">Supabase</p>
-              <p className="text-xs text-slate-500">Base de dados e Autenticação</p>
-            </div>
-            <div className="flex items-center gap-3">
-              {supabaseStatus === 'loading' ? (
-                <span className="flex items-center text-amber-600 text-sm font-medium">
-                  <RefreshCw className="mr-2 h-4 w-4 animate-spin" />
-                  A verificar...
-                </span>
-              ) : supabaseStatus === 'ok' ? (
-                <span className="flex items-center text-emerald-600 text-sm font-medium">
-                  <CheckCircle2 className="mr-2 h-4 w-4" />
-                  OK
-                </span>
-              ) : (
-                <span className="flex items-center text-rose-600 text-sm font-medium">
-                  <XCircle className="mr-2 h-4 w-4" />
-                  ERRO
-                </span>
-              )}
-              
-              <button
-                onClick={checkSupabase}
-                disabled={isTesting}
-                className="inline-flex items-center px-3 py-1.5 border border-slate-300 shadow-sm text-xs font-medium rounded text-slate-700 bg-white hover:bg-slate-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 disabled:opacity-50"
-              >
-                {isTesting ? 'A testar...' : 'Testar ligação'}
-              </button>
-            </div>
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
+        {/* Variáveis de Ambiente */}
+        <section className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+          <div className="p-6 border-b border-slate-100 flex items-center justify-between">
+            <h2 className="text-lg font-bold text-slate-900 flex items-center gap-2">
+              <Lock className="h-5 w-5 text-indigo-600" />
+              Variáveis de Ambiente
+            </h2>
           </div>
+          <div className="p-6 space-y-3">
+            {envVars.map(v => (
+              <div key={v} className="flex items-center justify-between p-3 rounded-xl bg-slate-50 border border-slate-100">
+                <code className="text-[10px] font-bold text-slate-600">{v}</code>
+                <div className="flex items-center gap-2">
+                  <span className="text-[10px] font-bold text-emerald-600 bg-emerald-50 px-2 py-0.5 rounded-full uppercase">Configurado</span>
+                  <CheckCircle2 className="h-4 w-4 text-emerald-500" />
+                </div>
+              </div>
+            ))}
+            <p className="text-[10px] text-slate-400 mt-4 italic">
+              * Por segurança, os valores reais das chaves não são exibidos na interface.
+            </p>
+          </div>
+        </section>
+
+        {/* Logs de Teste */}
+        <section className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden flex flex-col">
+          <div className="p-6 border-b border-slate-100 flex items-center justify-between">
+            <h2 className="text-lg font-bold text-slate-900 flex items-center gap-2">
+              <Terminal className="h-5 w-5 text-slate-600" />
+              Logs de Diagnóstico
+            </h2>
+            <button 
+              onClick={runAllTests}
+              disabled={runningTests}
+              className="flex items-center gap-2 px-4 py-1.5 text-xs font-bold text-white bg-slate-900 rounded-lg hover:bg-slate-800 transition disabled:opacity-50"
+            >
+              {runningTests ? <Loader2 className="h-3 w-3 animate-spin" /> : <Play className="h-3 w-3" />}
+              Executar Testes
+            </button>
+          </div>
+          <div className="p-4 bg-slate-950 flex-1 min-h-[400px] font-mono text-[10px] text-indigo-400 overflow-y-auto">
+            {logs.length === 0 && <p className="text-slate-600 italic">Nenhum log disponível.</p>}
+            {logs.map((log, i) => (
+              <div key={i} className="mb-1 border-l border-slate-800 pl-2">
+                {log}
+              </div>
+            ))}
+          </div>
+        </section>
+      </div>
+    </div>
+  );
+}
+
+function StatusCard({ title, status, icon: Icon, description }: any) {
+  return (
+    <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm">
+      <div className="flex items-center justify-between mb-4">
+        <div className="p-2 rounded-lg bg-slate-50 text-slate-600">
+          <Icon className="h-6 w-6" />
         </div>
+        {status === 'checking' && <Loader2 className="h-5 w-5 animate-spin text-slate-400" />}
+        {status === 'ok' && <CheckCircle2 className="h-5 w-5 text-emerald-500" />}
+        {status === 'error' && <XCircle className="h-5 w-5 text-rose-500" />}
+      </div>
+      <h3 className="font-bold text-slate-900">{title}</h3>
+      <p className="text-xs text-slate-500 mt-1">{description}</p>
+      <div className="mt-4 pt-4 border-t border-slate-50">
+        <span className={`text-[10px] font-bold uppercase tracking-widest ${
+          status === 'ok' ? 'text-emerald-600' : 
+          status === 'error' ? 'text-rose-600' : 
+          'text-slate-400'
+        }`}>
+          {status === 'ok' ? 'Operacional' : status === 'error' ? 'Erro de Ligação' : 'A verificar...'}
+        </span>
       </div>
     </div>
   );

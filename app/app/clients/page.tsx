@@ -1,7 +1,8 @@
 import { createClient } from '@/lib/supabase/server';
 import Link from 'next/link';
-import { Edit2, ExternalLink } from 'lucide-react';
+import { Edit2, ExternalLink, Copy, Zap, Search, Plus, Filter } from 'lucide-react';
 import { ClientActionButtons } from '@/components/clients/client-action-buttons';
+import { ClientQuickActions } from '@/components/clients/client-quick-actions';
 
 export const dynamic = 'force-dynamic';
 
@@ -21,103 +22,164 @@ export default async function ClientsPage({
   }
 
   if (query) {
-    dbQuery = dbQuery.ilike('name', `%${query}%`);
+    // Search in both company_name and phone_e164
+    // We try company_name first, then name (old), then phone_e164, then phone (old)
+    dbQuery = dbQuery.or(`company_name.ilike.%${query}%,name.ilike.%${query}%,phone_e164.ilike.%${query}%,phone.ilike.%${query}%`);
   }
 
-  const { data: clients, error } = await dbQuery.order('created_at', { ascending: false });
+  const { data: clients, error } = await dbQuery.order('updated_at', { ascending: false });
 
   const renderCell = (client: any, keys: string[]) => {
     for (const key of keys) {
-      if (client[key] !== undefined) return client[key];
+      if (client[key] !== undefined && client[key] !== null) return client[key];
     }
-    return <span className="text-rose-500 italic text-xs">coluna em falta</span>;
+    return <span className="text-rose-500 italic text-[10px]">coluna em falta</span>;
   };
 
   return (
-    <div>
-      <div className="mb-8 flex items-center justify-between">
-        <h1 className="text-3xl font-bold text-slate-900">Clientes</h1>
+    <div className="space-y-8">
+      <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+        <div>
+          <h1 className="text-3xl font-bold text-slate-900">Clientes</h1>
+          <p className="text-slate-500 text-sm mt-1">Gerencie as empresas e instâncias do bot.</p>
+        </div>
         <ClientActionButtons />
       </div>
 
-      <div className="mb-6 flex gap-4">
-        {['all', 'trial', 'active', 'expired'].map((s) => (
-          <Link
-            key={s}
-            href={`/app/clients?status=${s}`}
-            className={`rounded-full px-4 py-1 text-sm font-medium transition ${
-              status === s
-                ? 'bg-indigo-600 text-white'
-                : 'bg-white text-slate-600 border border-slate-200 hover:bg-slate-50'
-            }`}
-          >
-            {s.charAt(0).toUpperCase() + s.slice(1)}
-          </Link>
-        ))}
+      <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-sm flex flex-col md:flex-row gap-4 items-center">
+        <div className="relative flex-1 w-full">
+          <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+          <form action="/app/clients" method="GET">
+            <input
+              type="text"
+              name="q"
+              defaultValue={query}
+              placeholder="Pesquisar por empresa ou telefone..."
+              className="w-full rounded-lg border border-slate-300 pl-10 pr-4 py-2 text-sm focus:border-indigo-500 focus:ring-indigo-500"
+            />
+            {status !== 'all' && <input type="hidden" name="status" value={status} />}
+          </form>
+        </div>
+        
+        <div className="flex items-center gap-2 w-full md:w-auto overflow-x-auto pb-2 md:pb-0">
+          <Filter className="h-4 w-4 text-slate-400 shrink-0" />
+          {['all', 'trial', 'active', 'expired'].map((s) => (
+            <Link
+              key={s}
+              href={`/app/clients?status=${s}${query ? `&q=${query}` : ''}`}
+              className={`whitespace-nowrap rounded-full px-4 py-1.5 text-xs font-medium transition ${
+                status === s
+                  ? 'bg-indigo-600 text-white shadow-sm'
+                  : 'bg-slate-50 text-slate-600 border border-slate-200 hover:bg-slate-100'
+              }`}
+            >
+              {s === 'all' ? 'Todos' : s.charAt(0).toUpperCase() + s.slice(1)}
+            </Link>
+          ))}
+        </div>
       </div>
 
-      <div className="overflow-hidden rounded-2xl bg-white shadow-sm">
-        <table className="w-full text-left">
-          <thead className="bg-slate-50 text-xs font-semibold uppercase text-slate-500">
-            <tr>
-              <th className="px-6 py-4">Empresa</th>
-              <th className="px-6 py-4">Telefone</th>
-              <th className="px-6 py-4">Instância</th>
-              <th className="px-6 py-4">Status</th>
-              <th className="px-6 py-4">Expira em</th>
-              <th className="px-6 py-4 text-right">Ações</th>
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-slate-100 text-sm text-slate-700">
-            {clients?.map((client) => (
-              <tr key={client.id} className="hover:bg-slate-50 transition">
-                <td className="px-6 py-4 font-medium text-slate-900">
-                  {renderCell(client, ['company_name', 'name'])}
-                </td>
-                <td className="px-6 py-4 font-mono">
-                  {renderCell(client, ['phone_e164', 'phone'])}
-                </td>
-                <td className="px-6 py-4 font-mono text-xs">
-                  {renderCell(client, ['instance_name'])}
-                </td>
-                <td className="px-6 py-4">
-                  <span className={`rounded-full px-2 py-1 text-xs font-semibold ${
-                    client.status === 'active' ? 'bg-emerald-100 text-emerald-700' :
-                    client.status === 'trial' ? 'bg-indigo-100 text-indigo-700' :
-                    'bg-rose-100 text-rose-700'
-                  }`}>
-                    {client.status || <span className="text-rose-500 italic text-[10px]">coluna em falta</span>}
-                  </span>
-                </td>
-                <td className="px-6 py-4">
-                  {client.trial_ends_at || client.trial_end ? (
-                    new Date(client.trial_ends_at || client.trial_end).toLocaleDateString('pt-PT')
-                  ) : (
-                    <span className="text-slate-400">-</span>
-                  )}
-                </td>
-                <td className="px-6 py-4 text-right">
-                  <div className="flex justify-end gap-2">
-                    <Link href={`/app/clients/${client.id}`} className="p-1 text-slate-400 hover:text-indigo-600 transition">
-                      <Edit2 className="h-5 w-5" />
-                    </Link>
-                    <button className="p-1 text-slate-400 hover:text-slate-600 transition">
-                      <ExternalLink className="h-5 w-5" />
-                    </button>
-                  </div>
-                </td>
-              </tr>
-            ))}
-            {(!clients || clients.length === 0) && (
+      <div className="overflow-hidden rounded-xl bg-white border border-slate-200 shadow-sm">
+        <div className="overflow-x-auto">
+          <table className="w-full text-left border-collapse">
+            <thead className="bg-slate-50 text-[10px] font-bold uppercase tracking-wider text-slate-500 border-b border-slate-200">
               <tr>
-                <td colSpan={5} className="px-6 py-8 text-center text-slate-500">
-                  Nenhum cliente encontrado.
-                </td>
+                <th className="px-6 py-4">Empresa</th>
+                <th className="px-6 py-4">Telefone (E.164)</th>
+                <th className="px-6 py-4">Instância</th>
+                <th className="px-6 py-4">Status</th>
+                <th className="px-6 py-4">Expira em</th>
+                <th className="px-6 py-4">Última Atualiz.</th>
+                <th className="px-6 py-4 text-right">Ações</th>
               </tr>
-            )}
-          </tbody>
-        </table>
+            </thead>
+            <tbody className="divide-y divide-slate-100 text-sm text-slate-700">
+              {clients?.map((client) => (
+                <tr key={client.id} className="hover:bg-slate-50/50 transition-colors group">
+                  <td className="px-6 py-4">
+                    <div className="font-semibold text-slate-900">
+                      {renderCell(client, ['company_name', 'name'])}
+                    </div>
+                    <div className="text-[10px] text-slate-400 font-mono mt-0.5">ID: {client.id.substring(0, 8)}...</div>
+                  </td>
+                  <td className="px-6 py-4 font-mono text-xs">
+                    {renderCell(client, ['phone_e164', 'phone'])}
+                  </td>
+                  <td className="px-6 py-4">
+                    <code className="px-2 py-0.5 bg-slate-100 rounded text-[10px] font-mono text-slate-600">
+                      {renderCell(client, ['instance_name'])}
+                    </code>
+                  </td>
+                  <td className="px-6 py-4">
+                    <span className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-[10px] font-bold uppercase tracking-wider ${
+                      client.status === 'active' ? 'bg-emerald-100 text-emerald-700' :
+                      client.status === 'trial' ? 'bg-indigo-100 text-indigo-700' :
+                      'bg-rose-100 text-rose-700'
+                    }`}>
+                      {client.status || <span className="text-rose-500 italic text-[10px]">coluna em falta</span>}
+                    </span>
+                  </td>
+                  <td className="px-6 py-4 whitespace-nowrap">
+                    {client.trial_ends_at || client.trial_end ? (
+                      <div className="flex flex-col">
+                        <span className="text-slate-900 font-medium">
+                          {new Date(client.trial_ends_at || client.trial_end).toLocaleDateString('pt-PT')}
+                        </span>
+                        <span className="text-[10px] text-slate-400">
+                          {new Date(client.trial_ends_at || client.trial_end) < new Date() ? 'Expirado' : 'Válido'}
+                        </span>
+                      </div>
+                    ) : (
+                      <span className="text-slate-400">-</span>
+                    )}
+                  </td>
+                  <td className="px-6 py-4 text-xs text-slate-500">
+                    {client.updated_at ? new Date(client.updated_at).toLocaleString('pt-PT', { dateStyle: 'short', timeStyle: 'short' }) : '-'}
+                  </td>
+                  <td className="px-6 py-4 text-right">
+                    <ClientQuickActions client={client} />
+                  </td>
+                </tr>
+              ))}
+              {(!clients || clients.length === 0) && (
+                <tr>
+                  <td colSpan={7} className="px-6 py-12 text-center">
+                    <div className="flex flex-col items-center justify-center">
+                      <div className="h-12 w-12 rounded-full bg-slate-100 flex items-center justify-center mb-3">
+                        <Users className="h-6 w-6 text-slate-400" />
+                      </div>
+                      <p className="text-slate-500 font-medium">Nenhum cliente encontrado.</p>
+                      <p className="text-slate-400 text-xs mt-1">Tente ajustar os filtros ou criar um novo cliente.</p>
+                    </div>
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
       </div>
     </div>
+  );
+}
+
+function Users(props: any) {
+  return (
+    <svg
+      {...props}
+      xmlns="http://www.w3.org/2000/svg"
+      width="24"
+      height="24"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2" />
+      <circle cx="9" cy="7" r="4" />
+      <path d="M22 21v-2a4 4 0 0 0-3-3.87" />
+      <path d="M16 3.13a4 4 0 0 1 0 7.75" />
+    </svg>
   );
 }

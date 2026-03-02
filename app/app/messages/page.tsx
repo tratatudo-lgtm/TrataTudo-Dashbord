@@ -1,131 +1,160 @@
 import { createClient } from '@/lib/supabase/server';
-import { Search } from 'lucide-react';
+import { 
+  MessageSquare, Search, Filter, Calendar, 
+  ChevronLeft, ChevronRight, UserPlus, ExternalLink,
+  ArrowUpRight, ArrowDownLeft, Phone
+} from 'lucide-react';
+import Link from 'next/link';
+import { MessageRow } from '@/components/messages/message-row';
 
 export const dynamic = 'force-dynamic';
 
 export default async function MessagesPage({
   searchParams,
 }: {
-  searchParams: { q?: string; client_id?: string; page?: string };
+  searchParams: { 
+    q?: string; 
+    phone?: string; 
+    instance?: string; 
+    direction?: string;
+    page?: string;
+  };
 }) {
   const supabase = createClient();
   const query = searchParams.q || '';
-  const clientId = searchParams.client_id || '';
+  const phone = searchParams.phone || '';
+  const instance = searchParams.instance || '';
+  const direction = searchParams.direction || 'all';
   const page = parseInt(searchParams.page || '1');
-  const pageSize = 20;
+  const pageSize = 50;
 
-  // Fetch clients for the filter
-  const { data: clients } = await supabase.from('clients').select('id, company_name, name').order('company_name', { ascending: true });
+  let dbQuery = supabase.from('messages').select('*', { count: 'exact' });
 
-  let dbQuery = supabase
-    .from('messages')
-    .select('*', { count: 'exact' });
-
-  if (query) {
-    dbQuery = dbQuery.ilike('phone', `%${query}%`);
-  }
-
-  if (clientId) {
-    // If we have a client filter, we should ideally filter by their phone.
-    // Since messages are linked by phone, we find the client's phone first.
-    const { data: selectedClient } = await supabase.from('clients').select('phone, phone_e164').eq('id', clientId).single();
-    if (selectedClient) {
-      const phone = selectedClient.phone_e164 || selectedClient.phone;
-      if (phone) {
-        dbQuery = dbQuery.eq('phone', phone);
-      }
-    }
-  }
+  if (query) dbQuery = dbQuery.ilike('text', `%${query}%`);
+  if (phone) dbQuery = dbQuery.eq('phone', phone);
+  if (instance) dbQuery = dbQuery.eq('instance_name', instance);
+  if (direction !== 'all') dbQuery = dbQuery.eq('direction', direction);
 
   const { data: messages, count, error } = await dbQuery
     .order('created_at', { ascending: false })
     .range((page - 1) * pageSize, page * pageSize - 1);
 
+  // Fetch clients for the filter dropdown
+  const { data: clients } = await supabase.from('clients').select('id, company_name, phone_e164');
+
   return (
-    <div>
-      <div className="mb-8 flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
-        <h1 className="text-3xl font-bold text-slate-900">Histórico de Mensagens</h1>
-        <div className="flex flex-wrap gap-3">
-          <div className="relative w-64">
+    <div className="space-y-8">
+      <div>
+        <h1 className="text-3xl font-bold text-slate-900">Mensagens</h1>
+        <p className="text-slate-500 mt-1">Histórico global de interações de todos os bots.</p>
+      </div>
+
+      {/* Filters Bar */}
+      <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm space-y-4">
+        <div className="flex flex-col md:flex-row gap-4">
+          <div className="relative flex-1">
             <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
-            <input
-              type="text"
-              placeholder="Pesquisar por número..."
-              defaultValue={query}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter') {
-                  const val = (e.target as HTMLInputElement).value;
-                  window.location.href = `/app/messages?q=${val}${clientId ? `&client_id=${clientId}` : ''}`;
-                }
-              }}
-              className="w-full rounded-lg border border-slate-300 pl-9 pr-4 py-2 text-sm focus:border-indigo-500 focus:ring-indigo-500"
-            />
+            <form action="/app/messages" method="GET">
+              <input
+                type="text"
+                name="q"
+                defaultValue={query}
+                placeholder="Pesquisar no conteúdo das mensagens..."
+                className="w-full rounded-lg border border-slate-300 pl-10 pr-4 py-2 text-sm focus:border-indigo-500 focus:ring-indigo-500"
+              />
+              {phone && <input type="hidden" name="phone" value={phone} />}
+              {instance && <input type="hidden" name="instance" value={instance} />}
+              {direction !== 'all' && <input type="hidden" name="direction" value={direction} />}
+            </form>
           </div>
           
-          <select 
-            value={clientId}
-            onChange={(e) => {
-              window.location.href = `/app/messages?client_id=${e.target.value}${query ? `&q=${query}` : ''}`;
-            }}
-            className="rounded-lg border border-slate-300 px-3 py-2 text-sm focus:border-indigo-500 focus:ring-indigo-500"
-          >
-            <option value="">Todos os Clientes</option>
-            {clients?.map(c => (
-              <option key={c.id} value={c.id}>{c.company_name || c.name}</option>
-            ))}
-          </select>
+          <div className="flex flex-wrap items-center gap-2">
+            <select 
+              className="rounded-lg border border-slate-300 px-3 py-2 text-sm focus:border-indigo-500 focus:ring-indigo-500"
+              onChange={(e) => {
+                const val = e.target.value;
+                window.location.href = `/app/messages?phone=${val}${query ? `&q=${query}` : ''}${direction !== 'all' ? `&direction=${direction}` : ''}`;
+              }}
+              value={phone}
+            >
+              <option value="">Todos os Clientes</option>
+              {clients?.map(c => (
+                <option key={c.id} value={c.phone_e164}>{c.company_name}</option>
+              ))}
+            </select>
+
+            <select 
+              className="rounded-lg border border-slate-300 px-3 py-2 text-sm focus:border-indigo-500 focus:ring-indigo-500"
+              onChange={(e) => {
+                const val = e.target.value;
+                window.location.href = `/app/messages?direction=${val}${query ? `&q=${query}` : ''}${phone ? `&phone=${phone}` : ''}`;
+              }}
+              value={direction}
+            >
+              <option value="all">Todas as Direções</option>
+              <option value="in">Recebidas</option>
+              <option value="out">Enviadas</option>
+            </select>
+          </div>
         </div>
       </div>
 
-      <div className="overflow-hidden rounded-2xl bg-white shadow-sm">
-        <table className="w-full text-left">
-          <thead className="bg-slate-50 text-xs font-semibold uppercase text-slate-500">
-            <tr>
-              <th className="px-6 py-4">Data</th>
-              <th className="px-6 py-4">Telefone</th>
-              <th className="px-6 py-4">Mensagem</th>
-              <th className="px-6 py-4">Direção</th>
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-slate-100 text-sm text-slate-700">
-            {messages?.map((msg) => (
-              <tr key={msg.id} className="hover:bg-slate-50 transition">
-                <td className="px-6 py-4 whitespace-nowrap">
-                  {new Date(msg.created_at).toLocaleString('pt-PT')}
-                </td>
-                <td className="px-6 py-4 font-mono">{msg.phone}</td>
-                <td className="px-6 py-4 max-w-md truncate">{msg.text}</td>
-                <td className="px-6 py-4">
-                  <span className={`rounded-full px-2 py-1 text-xs font-semibold ${
-                    msg.direction === 'in' ? 'bg-blue-100 text-blue-700' : 'bg-emerald-100 text-emerald-700'
-                  }`}>
-                    {msg.direction === 'in' ? 'Recebida' : 'Enviada'}
-                  </span>
-                </td>
-              </tr>
-            ))}
-            {(!messages || messages.length === 0) && (
+      {/* Messages List */}
+      <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+        <div className="overflow-x-auto">
+          <table className="w-full text-left border-collapse">
+            <thead className="bg-slate-50 text-[10px] font-bold uppercase tracking-wider text-slate-500 border-b border-slate-200">
               <tr>
-                <td colSpan={4} className="px-6 py-8 text-center text-slate-500">
-                  Nenhuma mensagem encontrada.
-                </td>
+                <th className="px-6 py-4">Data / Hora</th>
+                <th className="px-6 py-4">Cliente / Telefone</th>
+                <th className="px-6 py-4">Direção</th>
+                <th className="px-6 py-4">Mensagem</th>
+                <th className="px-6 py-4 text-right">Ações</th>
               </tr>
-            )}
-          </tbody>
-        </table>
-      </div>
-
-      {count && count > pageSize && (
-        <div className="mt-6 flex justify-center gap-2">
-          {/* Paginação simples */}
-          <button className="rounded-lg border border-slate-300 px-4 py-2 hover:bg-slate-50 disabled:opacity-50" disabled={page === 1}>
-            Anterior
-          </button>
-          <button className="rounded-lg border border-slate-300 px-4 py-2 hover:bg-slate-50 disabled:opacity-50" disabled={page * pageSize >= count}>
-            Próxima
-          </button>
+            </thead>
+            <tbody className="divide-y divide-slate-100 text-sm text-slate-700">
+              {messages?.map((msg) => (
+                <MessageRow key={msg.id} message={msg} clients={clients || []} />
+              ))}
+              {(!messages || messages.length === 0) && (
+                <tr>
+                  <td colSpan={5} className="px-6 py-12 text-center">
+                    <div className="flex flex-col items-center justify-center">
+                      <div className="h-12 w-12 rounded-full bg-slate-100 flex items-center justify-center mb-3 text-slate-400">
+                        <MessageSquare className="h-6 w-6" />
+                      </div>
+                      <p className="text-slate-500 font-medium">Nenhuma mensagem encontrada.</p>
+                    </div>
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
         </div>
-      )}
+
+        {/* Pagination */}
+        {count && count > pageSize && (
+          <div className="p-4 border-t border-slate-100 flex items-center justify-between bg-slate-50/50">
+            <p className="text-xs text-slate-500">
+              A mostrar <span className="font-bold">{(page - 1) * pageSize + 1}</span> a <span className="font-bold">{Math.min(page * pageSize, count)}</span> de <span className="font-bold">{count}</span> mensagens
+            </p>
+            <div className="flex gap-2">
+              <Link
+                href={`/app/messages?page=${page - 1}${query ? `&q=${query}` : ''}${phone ? `&phone=${phone}` : ''}${direction !== 'all' ? `&direction=${direction}` : ''}`}
+                className={`p-2 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 transition ${page === 1 ? 'pointer-events-none opacity-50' : ''}`}
+              >
+                <ChevronLeft className="h-4 w-4" />
+              </Link>
+              <Link
+                href={`/app/messages?page=${page + 1}${query ? `&q=${query}` : ''}${phone ? `&phone=${phone}` : ''}${direction !== 'all' ? `&direction=${direction}` : ''}`}
+                className={`p-2 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 transition ${page * pageSize >= count ? 'pointer-events-none opacity-50' : ''}`}
+              >
+                <ChevronRight className="h-4 w-4" />
+              </Link>
+            </div>
+          </div>
+        )}
+      </div>
     </div>
   );
 }
