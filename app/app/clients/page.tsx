@@ -26,15 +26,38 @@ export default async function ClientsPage({
     const res = await fetch(endpoint, {
       cache: 'no-store'
     });
-    const data = await res.json();
-    if (!res.ok) {
-      throw new Error(data.error || 'Erro ao carregar clientes');
+    
+    // Check if response is valid JSON
+    let data: any = [];
+    try {
+      data = await res.json();
+    } catch (e) {
+      console.error('Failed to parse clients JSON:', e);
+      data = { error: 'Resposta inválida do servidor (JSON malformado)' };
     }
-    clients = data;
+
+    if (!res.ok) {
+      const errorMsg = data.error || 'Erro ao carregar clientes';
+      const isPermissionError = errorMsg.toLowerCase().includes('permission') || 
+                               errorMsg.toLowerCase().includes('rls') || 
+                               errorMsg.toLowerCase().includes('policy') ||
+                               errorMsg.toLowerCase().includes('not found') ||
+                               errorMsg.toLowerCase().includes('relation');
+      
+      error = errorMsg;
+      if (isPermissionError) {
+        hint = 'Sem permissões ou tabela inexistente. Verifique as políticas de RLS e se a tabela "clients" foi criada.';
+      } else {
+        hint = 'Verifique a ligação à base de dados e as variáveis de ambiente.';
+      }
+      console.error('Clients API Error:', { status: res.status, data });
+    } else {
+      clients = data || [];
+    }
   } catch (err: any) {
-    console.error('Error fetching clients:', err);
-    error = err.message;
-    hint = 'Verifique se a tabela "clients" existe e se a chave SUPABASE_SERVICE_ROLE_KEY está configurada.';
+    console.error('Critical Error in ClientsPage SSR:', err);
+    error = err.message || 'Ocorreu um erro inesperado no servidor.';
+    hint = 'Erro crítico durante a renderização. Verifique os logs do servidor.';
   }
 
   const renderCell = (client: any, keys: string[]) => {
@@ -53,6 +76,17 @@ export default async function ClientsPage({
         </div>
         <ClientActionButtons />
       </div>
+
+      {error && (
+        <div className="bg-rose-50 border border-rose-200 rounded-2xl p-6 flex items-start gap-4">
+          <AlertCircle className="h-6 w-6 text-rose-600 shrink-0 mt-0.5" />
+          <div>
+            <h3 className="text-rose-900 font-bold">Erro ao carregar dados</h3>
+            <p className="text-rose-700 text-sm mt-1">{error}</p>
+            {hint && <p className="text-rose-600 text-xs mt-2 font-medium">💡 Sugestão: {hint}</p>}
+          </div>
+        </div>
+      )}
 
       <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-sm flex flex-col md:flex-row gap-4 items-center">
         <div className="relative flex-1 w-full">

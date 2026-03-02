@@ -25,16 +25,38 @@ export default async function DashboardPage() {
 
   try {
     const res = await fetch(endpoint, { cache: 'no-store' });
-    const data = await res.json();
+    
+    // Check if response is valid JSON
+    let data: any = {};
+    try {
+      data = await res.json();
+    } catch (e) {
+      console.error('Failed to parse stats JSON:', e);
+      data = { error: 'Resposta inválida do servidor (JSON malformado)' };
+    }
+
     if (res.ok) {
       stats = data;
     } else {
-      throw new Error(data.error || 'Erro ao carregar estatísticas');
+      const errorMsg = data.error || 'Erro ao carregar estatísticas';
+      const isPermissionError = errorMsg.toLowerCase().includes('permission') || 
+                               errorMsg.toLowerCase().includes('rls') || 
+                               errorMsg.toLowerCase().includes('policy') ||
+                               errorMsg.toLowerCase().includes('not found') ||
+                               errorMsg.toLowerCase().includes('relation');
+      
+      error = errorMsg;
+      if (isPermissionError) {
+        hint = 'Sem permissões ou tabela inexistente. Verifique as políticas de RLS e se as tabelas "clients" e "messages" foram criadas.';
+      } else {
+        hint = 'Verifique a ligação à base de dados e as variáveis de ambiente.';
+      }
+      console.error('Stats API Error:', { status: res.status, data });
     }
   } catch (err: any) {
-    console.error('Error fetching dashboard stats:', err);
-    error = err.message;
-    hint = 'Verifique se a tabela "clients" e "messages" existem.';
+    console.error('Critical Error in DashboardPage SSR:', err);
+    error = err.message || 'Ocorreu um erro inesperado no servidor.';
+    hint = 'Erro crítico durante a renderização. Verifique os logs do servidor.';
   }
 
   const { activeCount, trialCount, expiredCount, messagesToday, expiringSoon } = stats;
@@ -45,6 +67,17 @@ export default async function DashboardPage() {
         <h1 className="text-3xl font-bold text-slate-900">Dashboard</h1>
         <p className="text-slate-500 mt-1">Bem-vindo ao TrataTudo. Aqui está o resumo da sua operação.</p>
       </div>
+
+      {error && (
+        <div className="bg-rose-50 border border-rose-200 rounded-2xl p-6 flex items-start gap-4">
+          <AlertCircle className="h-6 w-6 text-rose-600 shrink-0 mt-0.5" />
+          <div>
+            <h3 className="text-rose-900 font-bold">Erro ao carregar dados</h3>
+            <p className="text-rose-700 text-sm mt-1">{error}</p>
+            {hint && <p className="text-rose-600 text-xs mt-2 font-medium">💡 Sugestão: {hint}</p>}
+          </div>
+        </div>
+      )}
 
       {/* Stats Grid */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6">

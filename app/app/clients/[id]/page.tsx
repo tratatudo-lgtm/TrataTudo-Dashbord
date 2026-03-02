@@ -5,7 +5,8 @@ import {
   Calendar, Phone, Building2, Bot, History, Save, 
   Loader2, Zap, ShieldCheck, FileText, Clock, 
   Sparkles, Send, Copy, RefreshCw, Check, X,
-  ChevronLeft, ChevronRight, MessageSquare, Terminal
+  ChevronLeft, ChevronRight, MessageSquare, Terminal,
+  AlertCircle
 } from 'lucide-react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
@@ -285,6 +286,17 @@ export default function ClientDetailsPage({
           </div>
         </div>
       </div>
+
+      {error && (
+        <div className="bg-rose-50 border border-rose-200 rounded-2xl p-6 flex items-start gap-4">
+          <AlertCircle className="h-6 w-6 text-rose-600 shrink-0 mt-0.5" />
+          <div>
+            <h3 className="text-rose-900 font-bold">Erro ao carregar dados</h3>
+            <p className="text-rose-700 text-sm mt-1">{error}</p>
+            {hint && <p className="text-rose-600 text-xs mt-2 font-medium">💡 Sugestão: {hint}</p>}
+          </div>
+        </div>
+      )}
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
         {/* Left Column: Data & Prompt */}

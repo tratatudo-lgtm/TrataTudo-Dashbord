@@ -41,22 +41,50 @@ export default async function MessagesPage({
     const msgRes = await fetch(endpoint, {
       cache: 'no-store'
     });
-    const msgData = await msgRes.json();
-    if (!msgRes.ok) {
-      throw new Error(msgData.error || 'Erro ao carregar mensagens');
+    
+    // Check if response is valid JSON
+    let msgData: any = {};
+    try {
+      msgData = await msgRes.json();
+    } catch (e) {
+      console.error('Failed to parse messages JSON:', e);
+      msgData = { error: 'Resposta inválida do servidor (JSON malformado)' };
     }
-    messages = msgData.messages || [];
-    count = msgData.count || 0;
 
-    // Fetch clients for dropdown
-    const clientRes = await fetch(`${baseUrl}/api/admin/clients`, { cache: 'no-store' });
-    if (clientRes.ok) {
-      clients = await clientRes.json();
+    if (!msgRes.ok) {
+      // Specific check for RLS or missing table errors which often return 401, 403 or 404/500 with specific messages
+      const errorMsg = msgData.error || 'Erro ao carregar mensagens';
+      const isPermissionError = errorMsg.toLowerCase().includes('permission') || 
+                               errorMsg.toLowerCase().includes('rls') || 
+                               errorMsg.toLowerCase().includes('policy') ||
+                               errorMsg.toLowerCase().includes('not found') ||
+                               errorMsg.toLowerCase().includes('relation');
+      
+      error = errorMsg;
+      if (isPermissionError) {
+        hint = 'Sem permissões ou tabela inexistente. Verifique as políticas de RLS e se a tabela "messages" foi criada.';
+      } else {
+        hint = 'Verifique a ligação à base de dados e as variáveis de ambiente.';
+      }
+      console.error('Messages API Error:', { status: msgRes.status, data: msgData });
+    } else {
+      messages = msgData.messages || [];
+      count = msgData.count || 0;
+    }
+
+    // Fetch clients for dropdown - wrap in its own try/catch to not block messages if it fails
+    try {
+      const clientRes = await fetch(`${baseUrl}/api/admin/clients`, { cache: 'no-store' });
+      if (clientRes.ok) {
+        clients = await clientRes.json();
+      }
+    } catch (clientErr) {
+      console.error('Error fetching clients for dropdown:', clientErr);
     }
   } catch (err: any) {
-    console.error('Error fetching messages data:', err);
-    error = err.message;
-    hint = 'Verifique se a tabela "messages" existe e se a chave SUPABASE_SERVICE_ROLE_KEY está configurada.';
+    console.error('Critical Error in MessagesPage SSR:', err);
+    error = err.message || 'Ocorreu um erro inesperado no servidor.';
+    hint = 'Erro crítico durante a renderização. Verifique os logs do servidor.';
   }
 
   return (
@@ -65,6 +93,17 @@ export default async function MessagesPage({
         <h1 className="text-3xl font-bold text-slate-900">Mensagens</h1>
         <p className="text-slate-500 mt-1">Histórico global de interações de todos os bots.</p>
       </div>
+
+      {error && (
+        <div className="bg-rose-50 border border-rose-200 rounded-2xl p-6 flex items-start gap-4">
+          <AlertCircle className="h-6 w-6 text-rose-600 shrink-0 mt-0.5" />
+          <div>
+            <h3 className="text-rose-900 font-bold">Erro ao carregar dados</h3>
+            <p className="text-rose-700 text-sm mt-1">{error}</p>
+            {hint && <p className="text-rose-600 text-xs mt-2 font-medium">💡 Sugestão: {hint}</p>}
+          </div>
+        </div>
+      )}
 
       {/* Filters Bar */}
       <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm space-y-4">
