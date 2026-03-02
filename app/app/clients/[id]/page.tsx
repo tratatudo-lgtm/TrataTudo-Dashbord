@@ -174,16 +174,20 @@ export default function ClientDetailsPage({
         finalPrompt = finalPrompt.replace(ptSuffix, '');
       }
 
-      const res = await fetch(`/api/admin/clients/${params.id}`, {
-        method: 'PATCH',
+      const res = await fetch('/api/clients/update', {
+        method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
+          id: params.id,
           bot_instructions: finalPrompt,
           updated_at: new Date().toISOString()
         }),
       });
       if (!res.ok) throw new Error('Erro ao salvar prompt');
       
+      const data = await res.json();
+      if (!data.ok) throw new Error(data.error || 'Erro ao salvar prompt');
+
       setBotInstructions(finalPrompt);
       alert('Prompt salvo com sucesso!');
       router.refresh();
