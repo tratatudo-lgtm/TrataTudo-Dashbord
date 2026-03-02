@@ -1,4 +1,3 @@
-import { createClient } from '@/lib/supabase/server';
 import { 
   Users, MessageSquare, Zap, Clock, 
   TrendingUp, AlertCircle, Plus, Settings, 
@@ -10,28 +9,26 @@ import { StatsCard } from '@/components/stats-card';
 export const dynamic = 'force-dynamic';
 
 export default async function DashboardPage() {
-  const supabase = createClient();
+  const baseUrl = process.env.APP_URL || 'http://localhost:3000';
+  
+  let stats = {
+    activeCount: 0,
+    trialCount: 0,
+    expiredCount: 0,
+    messagesToday: 0,
+    expiringSoon: []
+  };
 
-  // Fetch stats
-  const { data: clients } = await supabase.from('clients').select('status, trial_ends_at, trial_end');
-  const { count: messagesToday } = await supabase
-    .from('messages')
-    .select('*', { count: 'exact', head: true })
-    .gte('created_at', new Date(new Date().setHours(0,0,0,0)).toISOString());
+  try {
+    const res = await fetch(`${baseUrl}/api/admin/stats`, { cache: 'no-store' });
+    if (res.ok) {
+      stats = await res.json();
+    }
+  } catch (err) {
+    console.error('Error fetching dashboard stats:', err);
+  }
 
-  const activeCount = clients?.filter(c => c.status === 'active').length || 0;
-  const trialCount = clients?.filter(c => c.status === 'trial').length || 0;
-  const expiredCount = clients?.filter(c => c.status === 'expired').length || 0;
-
-  // Trial alerts (expiring in 24h)
-  const tomorrow = new Date();
-  tomorrow.setDate(tomorrow.getDate() + 1);
-  const expiringSoon = clients?.filter(c => {
-    const end = c.trial_ends_at || c.trial_end;
-    if (!end || c.status !== 'trial') return false;
-    const endDate = new Date(end);
-    return endDate > new Date() && endDate <= tomorrow;
-  }) || [];
+  const { activeCount, trialCount, expiredCount, messagesToday, expiringSoon } = stats;
 
   return (
     <div className="space-y-8">

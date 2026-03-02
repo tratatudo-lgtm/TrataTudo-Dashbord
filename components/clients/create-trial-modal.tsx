@@ -1,7 +1,6 @@
 'use client';
 
 import { useState } from 'react';
-import { createClient } from '@/lib/supabase/client';
 import { X } from 'lucide-react';
 import { useRouter } from 'next/navigation';
 
@@ -18,7 +17,6 @@ export function CreateTrialModal({ isOpen, onClose }: { isOpen: boolean; onClose
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const router = useRouter();
-  const supabase = createClient();
 
   if (!isOpen) return null;
 
@@ -43,10 +41,15 @@ export function CreateTrialModal({ isOpen, onClose }: { isOpen: boolean; onClose
       updated_at: new Date().toISOString()
     };
 
-    const { error: dbError } = await supabase.from('clients').insert(payload);
+    const res = await fetch('/api/admin/clients', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
 
-    if (dbError) {
-      setError(`Erro ao criar cliente: ${dbError.message}`);
+    if (!res.ok) {
+      const errData = await res.json();
+      setError(`Erro ao criar cliente: ${errData.error || 'Erro desconhecido'}`);
       setLoading(false);
     } else {
       onClose();

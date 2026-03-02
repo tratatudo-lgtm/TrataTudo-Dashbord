@@ -1,4 +1,3 @@
-import { createClient } from '@/lib/supabase/server';
 import Link from 'next/link';
 import { Edit2, ExternalLink, Copy, Zap, Search, Plus, Filter } from 'lucide-react';
 import { ClientActionButtons } from '@/components/clients/client-action-buttons';
@@ -11,23 +10,28 @@ export default async function ClientsPage({
 }: {
   searchParams: { status?: string; q?: string };
 }) {
-  const supabase = createClient();
   const status = searchParams.status || 'all';
   const query = searchParams.q || '';
 
-  let dbQuery = supabase.from('clients').select('*');
+  // Get base URL for server-side fetch
+  const baseUrl = process.env.APP_URL || 'http://localhost:3000';
+  
+  let clients: any[] = [];
+  let error: string | null = null;
 
-  if (status !== 'all') {
-    dbQuery = dbQuery.eq('status', status);
+  try {
+    const res = await fetch(`${baseUrl}/api/admin/clients?status=${status}&q=${query}`, {
+      cache: 'no-store'
+    });
+    if (!res.ok) {
+      const errData = await res.json();
+      throw new Error(errData.error || 'Erro ao carregar clientes');
+    }
+    clients = await res.json();
+  } catch (err: any) {
+    console.error('Error fetching clients:', err);
+    error = err.message;
   }
-
-  if (query) {
-    // Search in both company_name and phone_e164
-    // We try company_name first, then name (old), then phone_e164, then phone (old)
-    dbQuery = dbQuery.or(`company_name.ilike.%${query}%,name.ilike.%${query}%,phone_e164.ilike.%${query}%,phone.ilike.%${query}%`);
-  }
-
-  const { data: clients, error } = await dbQuery.order('updated_at', { ascending: false });
 
   const renderCell = (client: any, keys: string[]) => {
     for (const key of keys) {

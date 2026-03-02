@@ -1,4 +1,3 @@
-import { createClient } from '@/lib/supabase/server';
 import { 
   MessageSquare, Search, Filter, Calendar, 
   ChevronLeft, ChevronRight, UserPlus, ExternalLink,
@@ -20,7 +19,6 @@ export default async function MessagesPage({
     page?: string;
   };
 }) {
-  const supabase = createClient();
   const query = searchParams.q || '';
   const phone = searchParams.phone || '';
   const instance = searchParams.instance || '';
@@ -28,19 +26,32 @@ export default async function MessagesPage({
   const page = parseInt(searchParams.page || '1');
   const pageSize = 50;
 
-  let dbQuery = supabase.from('messages').select('*', { count: 'exact' });
+  const baseUrl = process.env.APP_URL || 'http://localhost:3000';
+  
+  let messages: any[] = [];
+  let count = 0;
+  let clients: any[] = [];
+  let error: string | null = null;
 
-  if (query) dbQuery = dbQuery.ilike('text', `%${query}%`);
-  if (phone) dbQuery = dbQuery.eq('phone', phone);
-  if (instance) dbQuery = dbQuery.eq('instance_name', instance);
-  if (direction !== 'all') dbQuery = dbQuery.eq('direction', direction);
+  try {
+    // Fetch messages
+    const msgRes = await fetch(`${baseUrl}/api/admin/messages?q=${query}&phone=${phone}&instance=${instance}&direction=${direction}&page=${page}&limit=${pageSize}`, {
+      cache: 'no-store'
+    });
+    if (!msgRes.ok) throw new Error('Erro ao carregar mensagens');
+    const msgData = await msgRes.json();
+    messages = msgData.messages;
+    count = msgData.count;
 
-  const { data: messages, count, error } = await dbQuery
-    .order('created_at', { ascending: false })
-    .range((page - 1) * pageSize, page * pageSize - 1);
-
-  // Fetch clients for the filter dropdown
-  const { data: clients } = await supabase.from('clients').select('id, company_name, phone_e164');
+    // Fetch clients for dropdown
+    const clientRes = await fetch(`${baseUrl}/api/admin/clients`, { cache: 'no-store' });
+    if (clientRes.ok) {
+      clients = await clientRes.json();
+    }
+  } catch (err: any) {
+    console.error('Error fetching messages data:', err);
+    error = err.message;
+  }
 
   return (
     <div className="space-y-8">

@@ -7,7 +7,6 @@ import {
   Sparkles, Send, Copy, RefreshCw, Check, X,
   ChevronLeft, ChevronRight, MessageSquare
 } from 'lucide-react';
-import { createClient } from '@/lib/supabase/client';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 
@@ -22,7 +21,29 @@ export default function ClientDetailsPage({
   const [saving, setSaving] = useState(false);
   const [generatingPrompt, setGeneratingPrompt] = useState(false);
   const [sendingTest, setSendingTest] = useState(false);
+  const [subscribing, setSubscribing] = useState(false);
   const [testResult, setTestResult] = useState<{ success: boolean; message: string; log?: any } | null>(null);
+
+  const handleSubscribe = async () => {
+    if (!confirm('Deseja ativar o plano para este cliente? Isto criará uma instância dedicada.')) return;
+    setSubscribing(true);
+    try {
+      const res = await fetch('/api/admin/subscribe', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ client_id: params.id }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Erro ao ativar plano');
+      
+      alert(`Plano ativado! Instância: ${data.instance_name}`);
+      window.location.reload();
+    } catch (error: any) {
+      alert(error.message);
+    } finally {
+      setSubscribing(false);
+    }
+  };
   
   // Form states
   const [companyName, setCompanyName] = useState('');
@@ -41,48 +62,50 @@ export default function ClientDetailsPage({
   const pageSize = 50;
 
   const router = useRouter();
-  const supabase = createClient();
 
   useEffect(() => {
     async function fetchData() {
-      const { data: clientData } = await supabase
-        .from('clients')
-        .select('*')
-        .eq('id', params.id)
-        .single();
+      try {
+        const res = await fetch(`/api/admin/clients/${params.id}`);
+        if (!res.ok) throw new Error('Erro ao carregar cliente');
+        const clientData = await res.json();
 
-      if (clientData) {
-        setClient(clientData);
-        setCompanyName(clientData.company_name || clientData.name || '');
-        setPhoneE164(clientData.phone_e164 || clientData.phone || '');
-        setInstanceName(clientData.instance_name || '');
-        setStatus(clientData.status || 'trial');
-        setTrialEndsAt(clientData.trial_ends_at ? clientData.trial_ends_at.split('T')[0] : (clientData.trial_end ? clientData.trial_end.split('T')[0] : ''));
-        setSystemPrompt(clientData.system_prompt || '');
-        setTestPhone(clientData.phone_e164 || clientData.phone || '');
-        
-        // Check if "Responde sempre em Português de Portugal." is in the prompt
-        if (clientData.system_prompt?.includes('Responde sempre em Português de Portugal.')) {
-          setForcePTPT(true);
+        if (clientData) {
+          setClient(clientData);
+          setCompanyName(clientData.company_name || clientData.name || '');
+          setPhoneE164(clientData.phone_e164 || clientData.phone || '');
+          setInstanceName(clientData.instance_name || '');
+          setStatus(clientData.status || 'trial');
+          setTrialEndsAt(clientData.trial_ends_at ? clientData.trial_ends_at.split('T')[0] : (clientData.trial_end ? clientData.trial_end.split('T')[0] : ''));
+          setSystemPrompt(clientData.system_prompt || '');
+          setTestPhone(clientData.phone_e164 || clientData.phone || '');
+          
+          // Check if "Responde sempre em Português de Portugal." is in the prompt
+          if (clientData.system_prompt?.includes('Responde sempre em Português de Portugal.')) {
+            setForcePTPT(true);
+          }
+
+          fetchMessages(clientData.phone_e164 || clientData.phone);
         }
-
-        fetchMessages(clientData.phone_e164 || clientData.phone);
+      } catch (err) {
+        console.error('Error fetching client details:', err);
+      } finally {
+        setLoading(false);
       }
-      setLoading(false);
     }
     fetchData();
-  }, [params.id, supabase]);
+  }, [params.id]);
 
   const fetchMessages = async (phone: string) => {
     if (!phone) return;
-    const { data: messages } = await supabase
-      .from('messages')
-      .select('*')
-      .eq('phone', phone)
-      .order('created_at', { ascending: false })
-      .range((msgPage - 1) * pageSize, msgPage * pageSize - 1);
-    
-    setRecentMessages(messages || []);
+    try {
+      const res = await fetch(`/api/admin/messages?phone=${phone}&page=${msgPage}&limit=${pageSize}`);
+      if (!res.ok) throw new Error('Erro ao carregar mensagens');
+      const data = await res.json();
+      setRecentMessages(data.messages || []);
+    } catch (err) {
+      console.error('Error fetching messages:', err);
+    }
   };
 
   useEffect(() => {
@@ -95,7 +118,6 @@ export default function ClientDetailsPage({
     setSaving(true);
     try {
       const updates: any = {
-        id: params.id,
         company_name: companyName,
         phone_e164: phoneE164,
         instance_name: instanceName,
@@ -104,8 +126,8 @@ export default function ClientDetailsPage({
         updated_at: new Date().toISOString()
       };
 
-      const res = await fetch('/api/clients/update', {
-        method: 'POST',
+      const res = await fetch(`/api/admin/clients/${params.id}`, {
+        method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(updates),
       });
@@ -132,11 +154,10 @@ export default function ClientDetailsPage({
         finalPrompt = finalPrompt.replace(ptSuffix, '');
       }
 
-      const res = await fetch('/api/clients/update', {
-        method: 'POST',
+      const res = await fetch(`/api/admin/clients/${params.id}`, {
+        method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          id: params.id,
           system_prompt: finalPrompt,
           updated_at: new Date().toISOString()
         }),
@@ -166,13 +187,16 @@ export default function ClientDetailsPage({
     if (!mapsUrl) return alert('Insira o link do Google Maps.');
     setGeneratingPrompt(true);
     try {
-      const detailsRes = await fetch('/api/places/details', {
+      const resolveRes = await fetch('/api/places/resolve', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url: mapsUrl }),
+        body: JSON.stringify({ input: mapsUrl }),
       });
-      const details = await detailsRes.json();
-      if (!detailsRes.ok) throw new Error(details.error);
+      const details = await resolveRes.json();
+      if (!resolveRes.ok) {
+        console.error('Resolve Logs:', details.logs);
+        throw new Error(details.error || 'Erro ao resolver local');
+      }
 
       const promptRes = await fetch('/api/groq/generate-prompt', {
         method: 'POST',
@@ -258,6 +282,16 @@ export default function ClientDetailsPage({
                 Dados do Cliente
               </h2>
               <div className="flex gap-2">
+                {status !== 'active' && (
+                  <button 
+                    onClick={handleSubscribe}
+                    disabled={subscribing}
+                    className="flex items-center gap-2 px-4 py-1.5 text-sm font-bold text-white bg-emerald-600 rounded-lg hover:bg-emerald-700 transition disabled:opacity-50 shadow-sm"
+                  >
+                    {subscribing ? <Loader2 className="h-4 w-4 animate-spin" /> : <Zap className="h-4 w-4" />}
+                    Ativar Plano
+                  </button>
+                )}
                 <button 
                   onClick={handleRenew3Days}
                   className="px-3 py-1.5 text-xs font-semibold text-amber-700 bg-amber-50 border border-amber-100 rounded-lg hover:bg-amber-100 transition"

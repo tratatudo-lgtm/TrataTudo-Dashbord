@@ -17,20 +17,35 @@ export default function SettingsPage() {
   const [logs, setLogs] = useState<string[]>([]);
   const [runningTests, setRunningTests] = useState(false);
   
+  const [envStatus, setEnvStatus] = useState<any>(null);
+  
   const envVars = [
-    'NEXT_PUBLIC_SUPABASE_URL',
-    'NEXT_PUBLIC_SUPABASE_ANON_KEY',
-    'SUPABASE_SERVICE_ROLE_KEY',
-    'GROQ_API_KEY',
-    'GROQ_MODEL',
-    'GOOGLE_PLACES_API_KEY',
-    'EVOLUTION_API_URL',
-    'EVOLUTION_API_KEY',
-    'NEXT_PUBLIC_SITE_URL'
+    { name: 'NEXT_PUBLIC_SUPABASE_URL', key: 'supabaseUrl' },
+    { name: 'NEXT_PUBLIC_SUPABASE_ANON_KEY', key: 'supabaseAnonKey' },
+    { name: 'SUPABASE_SERVICE_ROLE_KEY', key: 'supabaseServiceKey', critical: true },
+    { name: 'GROQ_API_KEY', key: 'groqKey' },
+    { name: 'GROQ_MODEL', key: 'groqModel' },
+    { name: 'GOOGLE_PLACES_API_KEY', key: 'placesKey' },
+    { name: 'EVOLUTION_API_URL', key: 'evolutionUrl' },
+    { name: 'EVOLUTION_API_KEY', key: 'evolutionKey' },
+    { name: 'NEXT_PUBLIC_SITE_URL', key: 'siteUrl' }
   ];
 
   const addLog = (msg: string) => {
     setLogs(prev => [`[${new Date().toLocaleTimeString()}] ${msg}`, ...prev].slice(0, 50));
+  };
+
+  const checkConfig = async () => {
+    try {
+      const res = await fetch('/api/admin/config-check');
+      const data = await res.json();
+      setEnvStatus(data);
+      if (!data.supabaseServiceKey) {
+        addLog('CRÍTICO: SUPABASE_SERVICE_ROLE_KEY não encontrada. As listagens de Clientes/Mensagens não vão funcionar.');
+      }
+    } catch (err) {
+      console.error('Error checking config:', err);
+    }
   };
 
   const checkSupabase = async () => {
@@ -80,7 +95,7 @@ export default function SettingsPage() {
     setRunningTests(true);
     setLogs([]);
     addLog('Iniciando testes de sistema...');
-    await Promise.all([checkSupabase(), checkGroq(), checkEvolution()]);
+    await Promise.all([checkConfig(), checkSupabase(), checkGroq(), checkEvolution()]);
     addLog('Testes concluídos.');
     setRunningTests(false);
   };
@@ -127,15 +142,29 @@ export default function SettingsPage() {
             </h2>
           </div>
           <div className="p-6 space-y-3">
-            {envVars.map(v => (
-              <div key={v} className="flex items-center justify-between p-3 rounded-xl bg-slate-50 border border-slate-100">
-                <code className="text-[10px] font-bold text-slate-600">{v}</code>
-                <div className="flex items-center gap-2">
-                  <span className="text-[10px] font-bold text-emerald-600 bg-emerald-50 px-2 py-0.5 rounded-full uppercase">Configurado</span>
-                  <CheckCircle2 className="h-4 w-4 text-emerald-500" />
+            {envVars.map(v => {
+              const isConfigured = envStatus ? envStatus[v.key] : false;
+              return (
+                <div key={v.name} className={`flex items-center justify-between p-3 rounded-xl border ${
+                  isConfigured ? 'bg-slate-50 border-slate-100' : 'bg-rose-50 border-rose-100'
+                }`}>
+                  <div className="flex flex-col">
+                    <code className="text-[10px] font-bold text-slate-600">{v.name}</code>
+                    {v.critical && !isConfigured && (
+                      <span className="text-[9px] text-rose-600 font-bold uppercase mt-1">Obrigatório para Admin</span>
+                    )}
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full uppercase ${
+                      isConfigured ? 'text-emerald-600 bg-emerald-50' : 'text-rose-600 bg-rose-50'
+                    }`}>
+                      {isConfigured ? 'Configurado' : 'Em falta'}
+                    </span>
+                    {isConfigured ? <CheckCircle2 className="h-4 w-4 text-emerald-500" /> : <XCircle className="h-4 w-4 text-rose-500" />}
+                  </div>
                 </div>
-              </div>
-            ))}
+              );
+            })}
             <p className="text-[10px] text-slate-400 mt-4 italic">
               * Por segurança, os valores reais das chaves não são exibidos na interface.
             </p>
