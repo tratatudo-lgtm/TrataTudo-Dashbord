@@ -6,7 +6,7 @@ export async function POST(request: Request) {
     const { input } = await request.json();
     if (!input) return NextResponse.json({ error: 'Input é obrigatório' }, { status: 400 });
 
-    const details = await getPlaceDetails(input);
+    const { result: details, logs } = await getPlaceDetails(input);
 
     return NextResponse.json({
       place_id: details.place_id,
@@ -15,7 +15,7 @@ export async function POST(request: Request) {
       website: details.website,
       phone: details.formatted_phone_number || details.international_phone_number,
       types: details.types,
-      logs: ['Resolvido via getPlaceDetails flow']
+      logs
     });
 
   } catch (error: any) {

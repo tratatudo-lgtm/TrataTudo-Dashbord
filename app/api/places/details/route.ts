@@ -14,7 +14,7 @@ export async function POST(request: Request) {
     const { url } = await request.json();
     if (!url) throw new Error('URL do Google Maps é obrigatória');
 
-    const details = await getPlaceDetails(url);
+    const { result: details, logs } = await getPlaceDetails(url);
     let websiteText = '';
     
     if (details.website) {
@@ -30,7 +30,8 @@ export async function POST(request: Request) {
       website: details.website,
       rating: details.rating,
       reviewsSummary: details.reviews?.map((r: any) => r.text).join('\n').substring(0, 1000) || '',
-      websiteText
+      websiteText,
+      logs
     });
   } catch (error: any) {
     console.error('API Places Details Error:', error.message);
