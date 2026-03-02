@@ -1,5 +1,6 @@
 import { createAdminClient } from '@/lib/supabase/admin';
 import { NextResponse } from 'next/server';
+import { normalizeE164 } from '@/lib/phone';
 
 export async function POST(request: Request) {
   try {
@@ -17,11 +18,13 @@ export async function POST(request: Request) {
     }
 
     const instanceName = body.instance;
-    const senderPhone = body.data.key.remoteJid.split('@')[0]; // User's phone
+    const rawSenderPhone = body.data.key.remoteJid.split('@')[0]; // User's phone
     const botPhone = body.data.key.participant || ''; // Might be bot's phone in groups, or empty
     const text = message.conversation || message.extendedTextMessage?.text || '';
 
     if (!text) return NextResponse.json({ ok: true, message: 'No text content' });
+
+    const senderPhone = normalizeE164(rawSenderPhone) || rawSenderPhone;
 
     const supabase = createAdminClient();
 

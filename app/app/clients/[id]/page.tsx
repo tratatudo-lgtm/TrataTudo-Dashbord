@@ -9,6 +9,7 @@ import {
 } from 'lucide-react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
+import { normalizeE164 } from '@/lib/phone';
 
 export default function ClientDetailsPage({
   params,
@@ -117,9 +118,14 @@ export default function ClientDetailsPage({
   const handleSaveData = async () => {
     setSaving(true);
     try {
+      const normalizedPhone = normalizeE164(phoneE164);
+      if (!normalizedPhone) {
+        throw new Error('Formato de telefone inválido.');
+      }
+
       const updates: any = {
         company_name: companyName,
-        phone_e164: phoneE164,
+        phone_e164: normalizedPhone,
         instance_name: instanceName,
         status: status,
         trial_ends_at: trialEndsAt ? new Date(trialEndsAt).toISOString() : null,
@@ -195,7 +201,8 @@ export default function ClientDetailsPage({
       const details = await resolveRes.json();
       if (!resolveRes.ok) {
         console.error('Resolve Logs:', details.logs);
-        throw new Error(details.error || 'Erro ao resolver local');
+        const lastLog = details.logs?.[details.logs.length - 1] || 'unknown_error';
+        throw new Error(`${details.error || 'Erro ao resolver local'} (resolve_failed: ${lastLog})`);
       }
 
       const promptRes = await fetch('/api/groq/generate-prompt', {

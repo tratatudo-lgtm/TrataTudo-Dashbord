@@ -1,5 +1,6 @@
 import { createAdminClient } from '@/lib/supabase/admin';
 import { NextResponse } from 'next/server';
+import { normalizeE164 } from '@/lib/phone';
 
 export const dynamic = 'force-dynamic';
 
@@ -34,6 +35,15 @@ export async function GET(request: Request) {
 export async function POST(request: Request) {
   try {
     const body = await request.json();
+    
+    if (body.phone_e164) {
+      const normalized = normalizeE164(body.phone_e164);
+      if (!normalized) {
+        return NextResponse.json({ error: 'Formato de telefone inválido' }, { status: 400 });
+      }
+      body.phone_e164 = normalized;
+    }
+
     const supabase = createAdminClient();
 
     const { data, error } = await supabase

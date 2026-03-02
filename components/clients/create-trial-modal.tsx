@@ -3,6 +3,7 @@
 import { useState } from 'react';
 import { X } from 'lucide-react';
 import { useRouter } from 'next/navigation';
+import { normalizeE164 } from '@/lib/phone';
 
 export function CreateTrialModal({ isOpen, onClose }: { isOpen: boolean; onClose: () => void }) {
   const [companyName, setCompanyName] = useState('');
@@ -25,15 +26,16 @@ export function CreateTrialModal({ isOpen, onClose }: { isOpen: boolean; onClose
     setLoading(true);
     setError(null);
 
-    if (!phoneE164.startsWith('+')) {
-      setError('O telefone deve começar com + (ex: +351912345678)');
+    const normalizedPhone = normalizeE164(phoneE164);
+    if (!normalizedPhone) {
+      setError('Formato de telefone inválido. Use +351..., 00351..., ou 912345678.');
       setLoading(false);
       return;
     }
 
     const payload: any = {
       company_name: companyName,
-      phone_e164: phoneE164,
+      phone_e164: normalizedPhone,
       instance_name: instanceName || companyName.toLowerCase().replace(/\s+/g, '_'),
       status: status,
       trial_ends_at: new Date(trialEndsAt).toISOString(),

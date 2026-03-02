@@ -1,6 +1,7 @@
 import { createClient } from '@/lib/supabase/server';
 import { sendEvolutionMessage } from '@/lib/evolution';
 import { NextResponse } from 'next/server';
+import { normalizeE164 } from '@/lib/phone';
 
 export async function POST(request: Request) {
   const supabase = createClient();
@@ -13,11 +14,15 @@ export async function POST(request: Request) {
   try {
     const body = await request.json();
     const { instanceName, text } = body;
-    const phone = body.phone || body.number;
+    let phone = body.phone || body.number;
     
     if (!instanceName || !phone || !text) {
       throw new Error('Instância, telefone (phone ou number) e texto são obrigatórios');
     }
+
+    const normalized = normalizeE164(phone);
+    if (!normalized) throw new Error('Telefone inválido');
+    phone = normalized;
 
     const result = await sendEvolutionMessage(instanceName, phone, text);
 

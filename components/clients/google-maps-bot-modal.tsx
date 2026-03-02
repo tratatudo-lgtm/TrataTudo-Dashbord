@@ -1,7 +1,7 @@
 'use client';
 
 import { useState } from 'react';
-import { X, MapPin, Sparkles, Loader2 } from 'lucide-react';
+import { X, MapPin, Sparkles, Loader2, ChevronDown, ChevronUp, Copy, AlertCircle } from 'lucide-react';
 import { useRouter } from 'next/navigation';
 
 export function GoogleMapsBotModal({ isOpen, onClose }: { isOpen: boolean; onClose: () => void }) {
@@ -10,7 +10,8 @@ export function GoogleMapsBotModal({ isOpen, onClose }: { isOpen: boolean; onClo
   const [businessData, setBusinessData] = useState<any>(null);
   const [generatedPrompt, setGeneratedPrompt] = useState('');
   const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<{ message: string; logs?: string[]; finalUrl?: string } | null>(null);
+  const [showDebug, setShowDebug] = useState(false);
   const router = useRouter();
 
   if (!isOpen) return null;
@@ -19,17 +20,26 @@ export function GoogleMapsBotModal({ isOpen, onClose }: { isOpen: boolean; onClo
     setLoading(true);
     setError(null);
     setStep('processing');
+    setShowDebug(false);
 
     try {
-      // 1. Obter detalhes do Google Places
-      const detailsRes = await fetch('/api/places/details', {
+      // 1. Obter detalhes do Google Places via Resolve
+      const resolveRes = await fetch('/api/places/resolve', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url }),
+        body: JSON.stringify({ input: url }),
       });
       
-      const details = await detailsRes.json();
-      if (!detailsRes.ok) throw new Error(details.error);
+      const details = await resolveRes.json();
+      if (!resolveRes.ok) {
+        setError({ 
+          message: details.error || 'Erro ao resolver local', 
+          logs: details.logs,
+          finalUrl: details.finalUrl 
+        });
+        setStep('input');
+        return;
+      }
       setBusinessData(details);
 
       // 2. Gerar Prompt via Groq
@@ -45,16 +55,20 @@ export function GoogleMapsBotModal({ isOpen, onClose }: { isOpen: boolean; onClo
       setGeneratedPrompt(promptData.prompt);
       setStep('preview');
     } catch (err: any) {
-      setError(err.message);
+      setError({ message: err.message });
       setStep('input');
     } finally {
       setLoading(false);
     }
   };
 
+  const copyLogs = () => {
+    const logText = JSON.stringify(error, null, 2);
+    navigator.clipboard.writeText(logText);
+    alert('Logs copiados!');
+  };
+
   const handleSave = async () => {
-    // Aqui podes abrir o modal de criação de cliente já com o prompt preenchido
-    // Para este MVP, vamos apenas fechar e mostrar o prompt no console
     console.log('Prompt Gerado:', generatedPrompt);
     alert('Bot gerado com sucesso! Copia o prompt e cria o cliente.');
     onClose();
@@ -62,7 +76,7 @@ export function GoogleMapsBotModal({ isOpen, onClose }: { isOpen: boolean; onClo
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4 backdrop-blur-sm">
-      <div className="w-full max-w-2xl rounded-2xl bg-white p-8 shadow-2xl">
+      <div className="w-full max-w-2xl rounded-2xl bg-white p-8 shadow-2xl max-h-[90vh] overflow-y-auto">
         <div className="mb-6 flex items-center justify-between">
           <h2 className="text-2xl font-bold text-slate-900 flex items-center">
             <Sparkles className="mr-2 h-6 w-6 text-amber-500" />
@@ -100,7 +114,42 @@ export function GoogleMapsBotModal({ isOpen, onClose }: { isOpen: boolean; onClo
                 </button>
               </div>
             </div>
-            {error && <p className="text-sm text-red-600">{error}</p>}
+
+            {error && (
+              <div className="space-y-4">
+                <div className="p-4 bg-rose-50 border border-rose-100 rounded-xl flex items-start gap-3">
+                  <AlertCircle className="h-5 w-5 text-rose-600 shrink-0 mt-0.5" />
+                  <div className="flex-1">
+                    <p className="text-sm font-bold text-rose-800">{error.message}</p>
+                    <p className="text-xs text-rose-600 mt-1 font-mono">resolve_failed: {error.logs?.[error.logs.length - 1] || 'unknown_error'}</p>
+                    <button 
+                      onClick={copyLogs}
+                      className="mt-3 flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-wider text-rose-700 hover:text-rose-900"
+                    >
+                      <Copy className="h-3 w-3" /> Copiar logs técnicos
+                    </button>
+                  </div>
+                </div>
+
+                <div className="border border-slate-200 rounded-xl overflow-hidden">
+                  <button 
+                    onClick={() => setShowDebug(!showDebug)}
+                    className="w-full flex items-center justify-between p-3 bg-slate-50 hover:bg-slate-100 transition text-xs font-bold text-slate-600"
+                  >
+                    DEBUG INFO
+                    {showDebug ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
+                  </button>
+                  {showDebug && (
+                    <div className="p-4 bg-slate-900 text-indigo-400 font-mono text-[10px] space-y-2 overflow-x-auto">
+                      {error.finalUrl && <p className="text-emerald-400">Final URL: {error.finalUrl}</p>}
+                      {error.logs?.map((log, i) => (
+                        <p key={i}>{log}</p>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
           </div>
         )}
 
