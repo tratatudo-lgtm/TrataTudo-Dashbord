@@ -48,7 +48,7 @@ export function CreateTrialModal({ isOpen, onClose }: { isOpen: boolean; onClose
     const data = await res.json();
 
     if (!res.ok || !data.ok) {
-      setError(`Erro ao criar cliente: ${data.error || 'Erro desconhecido'}`);
+      setError(data.error || 'Erro ao criar cliente');
       setLoading(false);
     } else {
       onClose();

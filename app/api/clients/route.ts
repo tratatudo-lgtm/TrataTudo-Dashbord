@@ -70,11 +70,19 @@ export async function POST(request: Request) {
       .select()
       .single();
 
-    if (error) throw error;
+    if (error) {
+      if (error.code === '23505' || error.message?.includes('phone_e164')) {
+        return NextResponse.json({ ok: false, error: 'Este número já está registado.' }, { status: 400 });
+      }
+      throw error;
+    }
 
     return NextResponse.json({ ok: true });
   } catch (error: any) {
     console.error('API Clients POST Error:', error);
-    return NextResponse.json({ ok: false, error: error.message }, { status: 500 });
+    const message = error.code === '23505' || error.message?.includes('phone_e164') 
+      ? 'Este número já está registado.' 
+      : error.message;
+    return NextResponse.json({ ok: false, error: message }, { status: 500 });
   }
 }
