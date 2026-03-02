@@ -5,11 +5,12 @@ import {
   Calendar, Phone, Building2, Bot, History, Save, 
   Loader2, Zap, ShieldCheck, FileText, Clock, 
   Sparkles, Send, Copy, RefreshCw, Check, X,
-  ChevronLeft, ChevronRight, MessageSquare
+  ChevronLeft, ChevronRight, MessageSquare, Terminal
 } from 'lucide-react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { normalizeE164 } from '@/lib/phone';
+import { DebugPanel } from '@/components/debug-panel';
 
 export default function ClientDetailsPage({
   params,
@@ -24,6 +25,10 @@ export default function ClientDetailsPage({
   const [sendingTest, setSendingTest] = useState(false);
   const [subscribing, setSubscribing] = useState(false);
   const [testResult, setTestResult] = useState<{ success: boolean; message: string; log?: any } | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [hint, setHint] = useState<string | undefined>(undefined);
+  
+  const endpoint = `/api/admin/clients/${params.id}`;
 
   const handleSubscribe = async () => {
     if (!confirm('Deseja ativar o plano para este cliente? Isto criará uma instância dedicada.')) return;
@@ -67,10 +72,12 @@ export default function ClientDetailsPage({
   useEffect(() => {
     async function fetchData() {
       try {
-        const res = await fetch(`/api/admin/clients/${params.id}`);
-        if (!res.ok) throw new Error('Erro ao carregar cliente');
+        const res = await fetch(endpoint);
         const clientData = await res.json();
-
+        if (!res.ok) {
+          throw new Error(clientData.error || 'Erro ao carregar cliente');
+        }
+        
         if (clientData) {
           setClient(clientData);
           setCompanyName(clientData.company_name || clientData.name || '');
@@ -88,8 +95,10 @@ export default function ClientDetailsPage({
 
           fetchMessages(clientData.phone_e164 || clientData.phone);
         }
-      } catch (err) {
+      } catch (err: any) {
         console.error('Error fetching client details:', err);
+        setError(err.message);
+        setHint('Verifique se o ID do cliente é válido e se a tabela "clients" existe.');
       } finally {
         setLoading(false);
       }

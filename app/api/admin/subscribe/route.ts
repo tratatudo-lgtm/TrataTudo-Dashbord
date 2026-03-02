@@ -1,10 +1,16 @@
 import { createAdminClient } from '@/lib/supabase/admin';
 import { NextResponse } from 'next/server';
+import { validateAdmin } from '@/lib/auth-admin';
 
 export async function POST(request: Request) {
   try {
+    const { isAdmin, error: authError, status: authStatus } = await validateAdmin();
+    if (!isAdmin) {
+      return NextResponse.json({ ok: false, error: authError, hint: 'Apenas administradores podem ativar planos.' }, { status: authStatus });
+    }
+
     const { client_id } = await request.json();
-    if (!client_id) return NextResponse.json({ error: 'client_id é obrigatório' }, { status: 400 });
+    if (!client_id) return NextResponse.json({ ok: false, error: 'client_id é obrigatório' }, { status: 400 });
 
     const supabase = createAdminClient();
 

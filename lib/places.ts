@@ -1,32 +1,85 @@
 export async function getPlaceDetails(placeUrl: string) {
-  // Nota: Extrair o Place ID de um link do Maps pode ser complexo.
-  // Idealmente, o user passaria o nome ou o link seria resolvido.
-  // Para este MVP, vamos assumir que usamos a Search API para encontrar o negócio pelo link/nome.
-  
   const apiKey = process.env.GOOGLE_PLACES_API_KEY;
-  
-  // 1. Tentar extrair o nome do negócio do link (simplificado)
-  // Ex: https://www.google.com/maps/place/Nome+Do+Negocio/...
-  const decodedUrl = decodeURIComponent(placeUrl);
-  const match = decodedUrl.match(/place\/([^\/]+)/);
-  const query = match ? match[1].replace(/\+/g, ' ') : placeUrl;
-
-  const searchUrl = `https://maps.googleapis.com/maps/api/place/textsearch/json?query=${encodeURIComponent(query)}&key=${apiKey}&language=pt-PT`;
-  
-  const searchResponse = await fetch(searchUrl);
-  const searchData = await searchResponse.json();
-
-  if (!searchData.results || searchData.results.length === 0) {
-    throw new Error('Negócio não encontrado no Google Maps');
+  if (!apiKey) {
+    throw new Error('GOOGLE_PLACES_API_KEY não configurada no servidor.');
   }
 
-  const placeId = searchData.results[0].place_id;
+  let finalUrl = placeUrl;
+  const logs: string[] = [];
 
-  // 2. Obter detalhes completos
+  // 1. Resolver redirects de maps.app.goo.gl
+  if (placeUrl.includes('maps.app.goo.gl')) {
+    try {
+      const res = await fetch(placeUrl, { redirect: 'follow', method: 'HEAD' });
+      finalUrl = res.url;
+    } catch (err) {
+      console.error('Erro ao resolver redirect:', err);
+    }
+  }
+
+  // 2. Extrair "nome + morada" do finalUrl
+  // O padrão é /maps/place/NOME+MORADA/
+  const decodedUrl = decodeURIComponent(finalUrl);
+  const placeMatch = decodedUrl.match(/\/maps\/place\/([^\/@]+)/);
+  let query = placeMatch ? placeMatch[1].replace(/\+/g, ' ') : placeUrl;
+
+  // Se a query ainda parecer um URL, tentamos limpar
+  if (query.startsWith('http')) {
+    // Fallback: se não encontrou /place/, tenta pegar o que vier depois do último /
+    const parts = query.split('/');
+    query = parts[parts.length - 1] || query;
+  }
+
+  // 3. Chamar Google Places "Find Place From Text"
+  const findPlaceUrl = `https://maps.googleapis.com/maps/api/place/findplacefromtext/json?input=${encodeURIComponent(query)}&inputtype=textquery&fields=place_id&key=${apiKey}&language=pt-PT`;
+  
+  const findRes = await fetch(findPlaceUrl);
+  const findData = await findRes.json();
+
+  if (findData.status === 'REQUEST_DENIED') {
+    const errorInfo = {
+      status: findData.status,
+      error_message: findData.error_message,
+      endpoint: 'findplacefromtext',
+      hint: "Verificar Billing + Places API enabled + API key restrictions + referrer/domain no Google Cloud Console."
+    };
+    throw new Error(JSON.stringify(errorInfo));
+  }
+
+  if (!findData.candidates || findData.candidates.length === 0) {
+    // Tentar fallback com Text Search se o Find Place falhar
+    const textSearchUrl = `https://maps.googleapis.com/maps/api/place/textsearch/json?query=${encodeURIComponent(query)}&key=${apiKey}&language=pt-PT`;
+    const textRes = await fetch(textSearchUrl);
+    const textData = await textRes.json();
+    
+    if (textData.status === 'OK' && textData.results?.[0]) {
+      findData.candidates = [{ place_id: textData.results[0].place_id }];
+    } else {
+      throw new Error('Negócio não encontrado no Google Maps com a query: ' + query);
+    }
+  }
+
+  const placeId = findData.candidates[0].place_id;
+
+  // 4. Obter detalhes completos
   const detailsUrl = `https://maps.googleapis.com/maps/api/place/details/json?place_id=${placeId}&fields=name,formatted_address,formatted_phone_number,opening_hours,website,rating,reviews,types&key=${apiKey}&language=pt-PT`;
   
   const detailsResponse = await fetch(detailsUrl);
   const detailsData = await detailsResponse.json();
+
+  if (detailsData.status === 'REQUEST_DENIED') {
+    const errorInfo = {
+      status: detailsData.status,
+      error_message: detailsData.error_message,
+      endpoint: 'details',
+      hint: "Verificar Billing + Places API enabled + API key restrictions + referrer/domain no Google Cloud Console."
+    };
+    throw new Error(JSON.stringify(errorInfo));
+  }
+
+  if (detailsData.status !== 'OK') {
+    throw new Error(`Erro no Google Places (${detailsData.status}): ${detailsData.error_message || 'Sem mensagem'}`);
+  }
 
   return detailsData.result;
 }

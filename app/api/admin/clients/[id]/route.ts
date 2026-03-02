@@ -1,12 +1,18 @@
 import { createAdminClient } from '@/lib/supabase/admin';
 import { NextResponse } from 'next/server';
 import { normalizeE164 } from '@/lib/phone';
+import { validateAdmin } from '@/lib/auth-admin';
 
 export async function GET(
   request: Request,
   { params }: { params: { id: string } }
 ) {
   try {
+    const { isAdmin, error: authError, status: authStatus } = await validateAdmin();
+    if (!isAdmin) {
+      return NextResponse.json({ ok: false, error: authError, hint: 'Apenas administradores podem ver detalhes de clientes.' }, { status: authStatus });
+    }
+
     const id = params.id;
     const supabase = createAdminClient();
 
@@ -21,7 +27,7 @@ export async function GET(
     return NextResponse.json(data);
   } catch (error: any) {
     console.error('API Admin Clients GET ID Error:', error);
-    return NextResponse.json({ error: error.message }, { status: 500 });
+    return NextResponse.json({ ok: false, error: error.message, hint: 'Erro ao carregar detalhes do cliente.' }, { status: 500 });
   }
 }
 
@@ -30,31 +36,62 @@ export async function PATCH(
   { params }: { params: { id: string } }
 ) {
   try {
+    const { isAdmin, error: authError, status: authStatus } = await validateAdmin();
+    if (!isAdmin) {
+      return NextResponse.json({ ok: false, error: authError, hint: 'Apenas administradores podem atualizar clientes.' }, { status: authStatus });
+    }
+
     const id = params.id;
     const body = await request.json();
 
     if (body.phone_e164) {
       const normalized = normalizeE164(body.phone_e164);
       if (!normalized) {
-        return NextResponse.json({ error: 'Formato de telefone inválido' }, { status: 400 });
+        return NextResponse.json({ ok: false, error: 'Formato de telefone inválido', hint: 'Use o formato E.164 (ex: +351912345678)' }, { status: 400 });
       }
       body.phone_e164 = normalized;
     }
+
+    // Add aliases for common schema variations
+    const payload = { ...body };
+    if (payload.company_name && !payload.name) payload.name = payload.company_name;
+    if (payload.trial_ends_at && !payload.trial_expires_at) payload.trial_expires_at = payload.trial_ends_at;
+    if (payload.instance_name && !payload.instance_id) payload.instance_id = payload.instance_name;
 
     const supabase = createAdminClient();
 
     const { data, error } = await supabase
       .from('clients')
-      .update(body)
+      .update(payload)
       .eq('id', id)
       .select()
       .single();
 
-    if (error) throw error;
+    if (error) {
+      console.error('Supabase Clients PATCH Error:', error);
+      // If it's a column error, try a minimal update
+      if (error.message.includes('column') || error.code === '42703') {
+        const minimalPayload: any = {};
+        if (body.company_name || body.name) minimalPayload.company_name = body.company_name || body.name;
+        if (body.phone_e164 || body.phone) minimalPayload.phone_e164 = body.phone_e164 || body.phone;
+        if (body.status) minimalPayload.status = body.status;
+        
+        const { data: retryData, error: retryError } = await supabase
+          .from('clients')
+          .update(minimalPayload)
+          .eq('id', id)
+          .select()
+          .single();
+        
+        if (retryError) throw retryError;
+        return NextResponse.json(retryData);
+      }
+      throw error;
+    }
 
     return NextResponse.json(data);
   } catch (error: any) {
     console.error('API Admin Clients PATCH Error:', error);
-    return NextResponse.json({ error: error.message }, { status: 500 });
+    return NextResponse.json({ ok: false, error: error.message, hint: 'Erro ao atualizar dados do cliente.' }, { status: 500 });
   }
 }

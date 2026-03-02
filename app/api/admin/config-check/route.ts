@@ -1,8 +1,14 @@
 import { NextResponse } from 'next/server';
+import { validateAdmin } from '@/lib/auth-admin';
 
 export const dynamic = 'force-dynamic';
 
 export async function GET() {
+  const { isAdmin, error: authError, status: authStatus } = await validateAdmin();
+  if (!isAdmin) {
+    return NextResponse.json({ ok: false, error: authError, hint: 'Apenas administradores podem verificar configurações.' }, { status: authStatus });
+  }
+
   const config = {
     supabaseUrl: !!process.env.NEXT_PUBLIC_SUPABASE_URL,
     supabaseAnonKey: !!process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY,

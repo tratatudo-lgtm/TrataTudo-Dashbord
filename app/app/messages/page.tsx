@@ -1,10 +1,11 @@
 import { 
   MessageSquare, Search, Filter, Calendar, 
   ChevronLeft, ChevronRight, UserPlus, ExternalLink,
-  ArrowUpRight, ArrowDownLeft, Phone
+  ArrowUpRight, ArrowDownLeft, Phone, AlertCircle
 } from 'lucide-react';
 import Link from 'next/link';
 import { MessageRow } from '@/components/messages/message-row';
+import { DebugPanel } from '@/components/debug-panel';
 
 export const dynamic = 'force-dynamic';
 
@@ -27,21 +28,25 @@ export default async function MessagesPage({
   const pageSize = 50;
 
   const baseUrl = process.env.APP_URL || 'http://localhost:3000';
+  const endpoint = `${baseUrl}/api/admin/messages?q=${query}&phone=${phone}&instance=${instance}&direction=${direction}&page=${page}&limit=${pageSize}`;
   
   let messages: any[] = [];
   let count = 0;
   let clients: any[] = [];
   let error: string | null = null;
+  let hint: string | undefined = undefined;
 
   try {
     // Fetch messages
-    const msgRes = await fetch(`${baseUrl}/api/admin/messages?q=${query}&phone=${phone}&instance=${instance}&direction=${direction}&page=${page}&limit=${pageSize}`, {
+    const msgRes = await fetch(endpoint, {
       cache: 'no-store'
     });
-    if (!msgRes.ok) throw new Error('Erro ao carregar mensagens');
     const msgData = await msgRes.json();
-    messages = msgData.messages;
-    count = msgData.count;
+    if (!msgRes.ok) {
+      throw new Error(msgData.error || 'Erro ao carregar mensagens');
+    }
+    messages = msgData.messages || [];
+    count = msgData.count || 0;
 
     // Fetch clients for dropdown
     const clientRes = await fetch(`${baseUrl}/api/admin/clients`, { cache: 'no-store' });
@@ -51,6 +56,7 @@ export default async function MessagesPage({
   } catch (err: any) {
     console.error('Error fetching messages data:', err);
     error = err.message;
+    hint = 'Verifique se a tabela "messages" existe e se a chave SUPABASE_SERVICE_ROLE_KEY está configurada.';
   }
 
   return (
@@ -166,6 +172,7 @@ export default async function MessagesPage({
           </div>
         )}
       </div>
+      <DebugPanel endpoint={endpoint} error={error} hint={hint} data={messages} />
     </div>
   );
 }

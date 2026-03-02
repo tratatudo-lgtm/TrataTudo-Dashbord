@@ -1,15 +1,17 @@
 import { 
   Users, MessageSquare, Zap, Clock, 
   TrendingUp, AlertCircle, Plus, Settings, 
-  ChevronRight, ArrowUpRight
+  ChevronRight, ArrowUpRight, Terminal
 } from 'lucide-react';
 import Link from 'next/link';
 import { StatsCard } from '@/components/stats-card';
+import { DebugPanel } from '@/components/debug-panel';
 
 export const dynamic = 'force-dynamic';
 
 export default async function DashboardPage() {
   const baseUrl = process.env.APP_URL || 'http://localhost:3000';
+  const endpoint = `${baseUrl}/api/admin/stats`;
   
   let stats = {
     activeCount: 0,
@@ -18,14 +20,21 @@ export default async function DashboardPage() {
     messagesToday: 0,
     expiringSoon: []
   };
+  let error: string | null = null;
+  let hint: string | undefined = undefined;
 
   try {
-    const res = await fetch(`${baseUrl}/api/admin/stats`, { cache: 'no-store' });
+    const res = await fetch(endpoint, { cache: 'no-store' });
+    const data = await res.json();
     if (res.ok) {
-      stats = await res.json();
+      stats = data;
+    } else {
+      throw new Error(data.error || 'Erro ao carregar estatísticas');
     }
-  } catch (err) {
+  } catch (err: any) {
     console.error('Error fetching dashboard stats:', err);
+    error = err.message;
+    hint = 'Verifique se a tabela "clients" e "messages" existem.';
   }
 
   const { activeCount, trialCount, expiredCount, messagesToday, expiringSoon } = stats;
@@ -183,6 +192,7 @@ export default async function DashboardPage() {
           </section>
         </div>
       </div>
+      <DebugPanel endpoint={endpoint} error={error} hint={hint} data={stats} />
     </div>
   );
 }

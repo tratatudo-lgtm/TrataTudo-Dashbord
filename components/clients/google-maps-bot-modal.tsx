@@ -10,7 +10,7 @@ export function GoogleMapsBotModal({ isOpen, onClose }: { isOpen: boolean; onClo
   const [businessData, setBusinessData] = useState<any>(null);
   const [generatedPrompt, setGeneratedPrompt] = useState('');
   const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<{ message: string; logs?: string[]; finalUrl?: string } | null>(null);
+  const [error, setError] = useState<{ message: string; logs?: string[]; finalUrl?: string; diagnostics?: any } | null>(null);
   const [showDebug, setShowDebug] = useState(false);
   const router = useRouter();
 
@@ -35,7 +35,8 @@ export function GoogleMapsBotModal({ isOpen, onClose }: { isOpen: boolean; onClo
         setError({ 
           message: details.error || 'Erro ao resolver local', 
           logs: details.logs,
-          finalUrl: details.finalUrl 
+          finalUrl: details.finalUrl,
+          diagnostics: details.diagnostics
         });
         setStep('input');
         return;
@@ -121,6 +122,12 @@ export function GoogleMapsBotModal({ isOpen, onClose }: { isOpen: boolean; onClo
                   <AlertCircle className="h-5 w-5 text-rose-600 shrink-0 mt-0.5" />
                   <div className="flex-1">
                     <p className="text-sm font-bold text-rose-800">{error.message}</p>
+                    {error.diagnostics && (
+                      <div className="mt-2 p-2 bg-rose-100/50 rounded border border-rose-200 text-[10px] text-rose-900">
+                        <p className="font-bold">Dica: {error.diagnostics.hint}</p>
+                        <p className="mt-1 opacity-70">Status: {error.diagnostics.status} | Msg: {error.diagnostics.error_message}</p>
+                      </div>
+                    )}
                     <p className="text-xs text-rose-600 mt-1 font-mono">resolve_failed: {error.logs?.[error.logs.length - 1] || 'unknown_error'}</p>
                     <button 
                       onClick={copyLogs}

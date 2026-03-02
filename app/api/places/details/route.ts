@@ -33,6 +33,21 @@ export async function POST(request: Request) {
       websiteText
     });
   } catch (error: any) {
+    console.error('API Places Details Error:', error.message);
+    
+    // Check if error is a JSON diagnostic
+    try {
+      const diag = JSON.parse(error.message);
+      if (diag.status === 'REQUEST_DENIED') {
+        return NextResponse.json({ 
+          error: 'Acesso Negado à Google Places API',
+          diagnostics: diag
+        }, { status: 403 });
+      }
+    } catch (e) {
+      // Not a JSON error
+    }
+
     return NextResponse.json({ error: error.message }, { status: 500 });
   }
 }

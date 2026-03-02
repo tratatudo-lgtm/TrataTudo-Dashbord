@@ -4,9 +4,10 @@ import { useState, useEffect } from 'react';
 import { 
   Settings, ShieldCheck, Database, Bot, Zap, 
   CheckCircle2, XCircle, Loader2, Play, Terminal,
-  Lock, Eye, EyeOff
+  Lock, Eye, EyeOff, AlertCircle
 } from 'lucide-react';
 import { createClient } from '@/lib/supabase/client';
+import { DebugPanel } from '@/components/debug-panel';
 
 export default function SettingsPage() {
   const [status, setStatus] = useState({
@@ -18,6 +19,10 @@ export default function SettingsPage() {
   const [runningTests, setRunningTests] = useState(false);
   
   const [envStatus, setEnvStatus] = useState<any>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [hint, setHint] = useState<string | undefined>(undefined);
+  
+  const endpoint = '/api/admin/config-check';
   
   const envVars = [
     { name: 'NEXT_PUBLIC_SUPABASE_URL', key: 'supabaseUrl' },
@@ -37,14 +42,19 @@ export default function SettingsPage() {
 
   const checkConfig = async () => {
     try {
-      const res = await fetch('/api/admin/config-check');
+      const res = await fetch(endpoint);
       const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.error || 'Erro ao verificar configuração');
+      }
       setEnvStatus(data);
       if (!data.supabaseServiceKey) {
         addLog('CRÍTICO: SUPABASE_SERVICE_ROLE_KEY não encontrada. As listagens de Clientes/Mensagens não vão funcionar.');
       }
-    } catch (err) {
+    } catch (err: any) {
       console.error('Error checking config:', err);
+      setError(err.message);
+      setHint('Verifique se as variáveis de ambiente estão configuradas no AI Studio.');
     }
   };
 
@@ -197,6 +207,7 @@ export default function SettingsPage() {
           </div>
         </section>
       </div>
+      <DebugPanel endpoint={endpoint} error={error} hint={hint} data={envStatus} />
     </div>
   );
 }

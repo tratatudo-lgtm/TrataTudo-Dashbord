@@ -1,7 +1,8 @@
 import Link from 'next/link';
-import { Edit2, ExternalLink, Copy, Zap, Search, Plus, Filter } from 'lucide-react';
+import { Edit2, ExternalLink, Copy, Zap, Search, Plus, Filter, AlertCircle } from 'lucide-react';
 import { ClientActionButtons } from '@/components/clients/client-action-buttons';
 import { ClientQuickActions } from '@/components/clients/client-quick-actions';
+import { DebugPanel } from '@/components/debug-panel';
 
 export const dynamic = 'force-dynamic';
 
@@ -15,22 +16,25 @@ export default async function ClientsPage({
 
   // Get base URL for server-side fetch
   const baseUrl = process.env.APP_URL || 'http://localhost:3000';
+  const endpoint = `${baseUrl}/api/admin/clients?status=${status}&q=${query}`;
   
   let clients: any[] = [];
   let error: string | null = null;
+  let hint: string | undefined = undefined;
 
   try {
-    const res = await fetch(`${baseUrl}/api/admin/clients?status=${status}&q=${query}`, {
+    const res = await fetch(endpoint, {
       cache: 'no-store'
     });
+    const data = await res.json();
     if (!res.ok) {
-      const errData = await res.json();
-      throw new Error(errData.error || 'Erro ao carregar clientes');
+      throw new Error(data.error || 'Erro ao carregar clientes');
     }
-    clients = await res.json();
+    clients = data;
   } catch (err: any) {
     console.error('Error fetching clients:', err);
     error = err.message;
+    hint = 'Verifique se a tabela "clients" existe e se a chave SUPABASE_SERVICE_ROLE_KEY está configurada.';
   }
 
   const renderCell = (client: any, keys: string[]) => {
@@ -162,6 +166,7 @@ export default async function ClientsPage({
           </table>
         </div>
       </div>
+      <DebugPanel endpoint={endpoint} error={error} hint={hint} data={clients} />
     </div>
   );
 }

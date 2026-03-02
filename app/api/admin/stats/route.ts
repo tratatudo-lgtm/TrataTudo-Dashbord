@@ -1,10 +1,16 @@
 import { createAdminClient } from '@/lib/supabase/admin';
 import { NextResponse } from 'next/server';
+import { validateAdmin } from '@/lib/auth-admin';
 
 export const dynamic = 'force-dynamic';
 
 export async function GET() {
   try {
+    const { isAdmin, error: authError, status: authStatus } = await validateAdmin();
+    if (!isAdmin) {
+      return NextResponse.json({ ok: false, error: authError, hint: 'Apenas administradores podem ver estatísticas.' }, { status: authStatus });
+    }
+
     const supabase = createAdminClient();
 
     // 1. Clients stats

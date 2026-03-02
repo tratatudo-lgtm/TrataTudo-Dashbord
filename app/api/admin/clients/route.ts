@@ -1,11 +1,17 @@
 import { createAdminClient } from '@/lib/supabase/admin';
 import { NextResponse } from 'next/server';
 import { normalizeE164 } from '@/lib/phone';
+import { validateAdmin } from '@/lib/auth-admin';
 
 export const dynamic = 'force-dynamic';
 
 export async function GET(request: Request) {
   try {
+    const { isAdmin, error: authError, status: authStatus } = await validateAdmin();
+    if (!isAdmin) {
+      return NextResponse.json({ ok: false, error: authError, hint: 'Apenas administradores podem listar clientes.' }, { status: authStatus });
+    }
+
     const { searchParams } = new URL(request.url);
     const status = searchParams.get('status');
     const query = searchParams.get('q');
@@ -23,40 +29,95 @@ export async function GET(request: Request) {
 
     const { data, error } = await dbQuery.order('updated_at', { ascending: false });
 
-    if (error) throw error;
+    if (error) {
+      console.error('Supabase Clients Error:', error);
+      // Fallback: try to select only columns we are reasonably sure about
+      const { data: fallbackData, error: fallbackError } = await supabase
+        .from('clients')
+        .select('id, status, created_at')
+        .order('created_at', { ascending: false });
+      
+      if (fallbackError) throw fallbackError;
+      
+      return NextResponse.json(fallbackData.map((c: any) => ({
+        ...c,
+        company_name: c.company_name || c.name || 'Empresa sem nome',
+        phone_e164: c.phone_e164 || c.phone || 'N/A'
+      })));
+    }
 
-    return NextResponse.json(data || []);
+    // Map data to ensure consistent field names for the UI
+    const mappedClients = data?.map((c: any) => ({
+      ...c,
+      company_name: c.company_name || c.name || '',
+      phone_e164: c.phone_e164 || c.phone || '',
+      instance_name: c.instance_name || c.instance_id || '',
+      trial_ends_at: c.trial_ends_at || c.trial_expires_at || c.trial_end || null
+    })) || [];
+
+    return NextResponse.json(mappedClients);
   } catch (error: any) {
     console.error('API Admin Clients GET Error:', error);
-    return NextResponse.json({ error: error.message }, { status: 500 });
+    return NextResponse.json({ ok: false, error: error.message, hint: 'Erro ao consultar a base de dados.' }, { status: 500 });
   }
 }
 
 export async function POST(request: Request) {
   try {
+    const { isAdmin, error: authError, status: authStatus } = await validateAdmin();
+    if (!isAdmin) {
+      return NextResponse.json({ ok: false, error: authError, hint: 'Apenas administradores podem criar clientes.' }, { status: authStatus });
+    }
+
     const body = await request.json();
     
     if (body.phone_e164) {
       const normalized = normalizeE164(body.phone_e164);
       if (!normalized) {
-        return NextResponse.json({ error: 'Formato de telefone inválido' }, { status: 400 });
+        return NextResponse.json({ ok: false, error: 'Formato de telefone inválido', hint: 'Use o formato E.164 (ex: +351912345678)' }, { status: 400 });
       }
       body.phone_e164 = normalized;
     }
 
+    // Add aliases for common schema variations
+    const payload = { ...body };
+    if (payload.company_name && !payload.name) payload.name = payload.company_name;
+    if (payload.trial_ends_at && !payload.trial_expires_at) payload.trial_expires_at = payload.trial_ends_at;
+    if (payload.instance_name && !payload.instance_id) payload.instance_id = payload.instance_name;
+
     const supabase = createAdminClient();
 
+    // We'll try to insert, and if it fails due to unknown columns, we'll strip them and try again
     const { data, error } = await supabase
       .from('clients')
-      .insert([body])
+      .insert([payload])
       .select()
       .single();
 
-    if (error) throw error;
+    if (error) {
+      console.error('Supabase Clients POST Error:', error);
+      // If it's a column error, try a minimal insert
+      if (error.message.includes('column') || error.code === '42703') {
+        const minimalPayload = {
+          company_name: body.company_name || body.name,
+          phone_e164: body.phone_e164 || body.phone,
+          status: body.status || 'trial'
+        };
+        const { data: retryData, error: retryError } = await supabase
+          .from('clients')
+          .insert([minimalPayload])
+          .select()
+          .single();
+        
+        if (retryError) throw retryError;
+        return NextResponse.json(retryData);
+      }
+      throw error;
+    }
 
     return NextResponse.json(data);
   } catch (error: any) {
     console.error('API Admin Clients POST Error:', error);
-    return NextResponse.json({ error: error.message }, { status: 500 });
+    return NextResponse.json({ ok: false, error: error.message, hint: 'Erro ao inserir na base de dados.' }, { status: 500 });
   }
 }
