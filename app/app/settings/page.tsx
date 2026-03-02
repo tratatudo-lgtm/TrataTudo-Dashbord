@@ -22,7 +22,7 @@ export default function SettingsPage() {
   const [error, setError] = useState<string | null>(null);
   const [hint, setHint] = useState<string | undefined>(undefined);
   
-  const endpoint = '/api/admin/config-check';
+  const endpoint = '/api/diagnostics/env';
   
   const envVars = [
     { name: 'NEXT_PUBLIC_SUPABASE_URL', key: 'supabaseUrl' },
@@ -33,7 +33,8 @@ export default function SettingsPage() {
     { name: 'GOOGLE_PLACES_API_KEY', key: 'placesKey' },
     { name: 'EVOLUTION_API_URL', key: 'evolutionUrl' },
     { name: 'EVOLUTION_API_KEY', key: 'evolutionKey' },
-    { name: 'NEXT_PUBLIC_SITE_URL', key: 'siteUrl' }
+    { name: 'NEXT_PUBLIC_SITE_URL', key: 'siteUrl' },
+    { name: 'APP_URL', key: 'appUrl' }
   ];
 
   const addLog = (msg: string) => {

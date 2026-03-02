@@ -1,6 +1,7 @@
 import { createAdminClient } from '@/lib/supabase/admin';
 import { NextResponse } from 'next/server';
 import { normalizeE164 } from '@/lib/phone';
+import { getBaseUrl } from '@/lib/baseUrl';
 
 export async function POST(request: Request) {
   try {
@@ -63,7 +64,8 @@ export async function POST(request: Request) {
     });
 
     // Call Groq for AI response
-    const groqRes = await fetch(`${process.env.APP_URL}/api/groq/chat`, {
+    const baseUrl = getBaseUrl();
+    const groqRes = await fetch(`${baseUrl}/api/groq/chat`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({

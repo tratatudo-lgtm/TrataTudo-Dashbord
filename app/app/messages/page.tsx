@@ -1,91 +1,95 @@
+'use client';
+
 import { 
   MessageSquare, Search, Filter, Calendar, 
   ChevronLeft, ChevronRight, UserPlus, ExternalLink,
-  ArrowUpRight, ArrowDownLeft, Phone, AlertCircle
+  ArrowUpRight, ArrowDownLeft, Phone, AlertCircle, Loader2
 } from 'lucide-react';
 import Link from 'next/link';
+import { useSearchParams, useRouter } from 'next/navigation';
+import { useEffect, useState, useCallback } from 'react';
 import { MessageRow } from '@/components/messages/message-row';
 import { DebugPanel } from '@/components/debug-panel';
 
-export const dynamic = 'force-dynamic';
-
-export default async function MessagesPage({
-  searchParams,
-}: {
-  searchParams: { 
-    q?: string; 
-    phone?: string; 
-    instance?: string; 
-    direction?: string;
-    page?: string;
-  };
-}) {
-  const query = searchParams.q || '';
-  const phone = searchParams.phone || '';
-  const instance = searchParams.instance || '';
-  const direction = searchParams.direction || 'all';
-  const page = parseInt(searchParams.page || '1');
+export default function MessagesPage() {
+  const searchParams = useSearchParams();
+  const router = useRouter();
+  
+  const query = searchParams.get('q') || '';
+  const phone = searchParams.get('phone') || '';
+  const instance = searchParams.get('instance') || '';
+  const direction = searchParams.get('direction') || 'all';
+  const page = parseInt(searchParams.get('page') || '1');
   const pageSize = 50;
 
-  const baseUrl = process.env.APP_URL || 'http://localhost:3000';
-  const endpoint = `${baseUrl}/api/admin/messages?q=${query}&phone=${phone}&instance=${instance}&direction=${direction}&page=${page}&limit=${pageSize}`;
-  
-  let messages: any[] = [];
-  let count = 0;
-  let clients: any[] = [];
-  let error: string | null = null;
-  let hint: string | undefined = undefined;
+  const [messages, setMessages] = useState<any[]>([]);
+  const [count, setCount] = useState(0);
+  const [clients, setClients] = useState<any[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [hint, setHint] = useState<string | undefined>(undefined);
 
-  try {
-    // Fetch messages
-    const msgRes = await fetch(endpoint, {
-      cache: 'no-store'
-    });
+  const fetchMessages = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    setHint(undefined);
     
-    // Check if response is valid JSON
-    let msgData: any = {};
+    const endpoint = `/api/messages?q=${encodeURIComponent(query)}&phone=${encodeURIComponent(phone)}&instance=${encodeURIComponent(instance)}&direction=${direction}&page=${page}&limit=${pageSize}`;
+    
     try {
-      msgData = await msgRes.json();
-    } catch (e) {
-      console.error('Failed to parse messages JSON:', e);
-      msgData = { error: 'Resposta inválida do servidor (JSON malformado)' };
-    }
-
-    if (!msgRes.ok) {
-      // Specific check for RLS or missing table errors which often return 401, 403 or 404/500 with specific messages
-      const errorMsg = msgData.error || 'Erro ao carregar mensagens';
-      const isPermissionError = errorMsg.toLowerCase().includes('permission') || 
-                               errorMsg.toLowerCase().includes('rls') || 
-                               errorMsg.toLowerCase().includes('policy') ||
-                               errorMsg.toLowerCase().includes('not found') ||
-                               errorMsg.toLowerCase().includes('relation');
+      const res = await fetch(endpoint);
+      const data = await res.json();
       
-      error = errorMsg;
-      if (isPermissionError) {
-        hint = 'Sem permissões ou tabela inexistente. Verifique as políticas de RLS e se a tabela "messages" foi criada.';
+      if (!res.ok) {
+        const errorMsg = data.error || 'Erro ao carregar mensagens';
+        setError(errorMsg);
+        if (errorMsg.toLowerCase().includes('permission') || errorMsg.toLowerCase().includes('rls') || errorMsg.toLowerCase().includes('relation')) {
+          setHint('Sem permissões ou tabela inexistente. Verifique as políticas de RLS e se a tabela "messages" foi criada.');
+        } else {
+          setHint('Verifique a ligação à base de dados e as variáveis de ambiente.');
+        }
       } else {
-        hint = 'Verifique a ligação à base de dados e as variáveis de ambiente.';
+        setMessages(data.messages || []);
+        setCount(data.count || 0);
       }
-      console.error('Messages API Error:', { status: msgRes.status, data: msgData });
-    } else {
-      messages = msgData.messages || [];
-      count = msgData.count || 0;
+    } catch (err: any) {
+      console.error('Error fetching messages:', err);
+      setError(err.message || 'Ocorreu um erro inesperado ao carregar as mensagens.');
+    } finally {
+      setLoading(false);
     }
+  }, [query, phone, instance, direction, page, pageSize]);
 
-    // Fetch clients for dropdown - wrap in its own try/catch to not block messages if it fails
+  const fetchClients = useCallback(async () => {
     try {
-      const clientRes = await fetch(`${baseUrl}/api/admin/clients`, { cache: 'no-store' });
-      if (clientRes.ok) {
-        clients = await clientRes.json();
+      const res = await fetch('/api/admin/clients');
+      if (res.ok) {
+        const data = await res.json();
+        setClients(data || []);
       }
-    } catch (clientErr) {
-      console.error('Error fetching clients for dropdown:', clientErr);
+    } catch (err) {
+      console.error('Error fetching clients:', err);
     }
-  } catch (err: any) {
-    console.error('Critical Error in MessagesPage SSR:', err);
-    error = err.message || 'Ocorreu um erro inesperado no servidor.';
-    hint = 'Erro crítico durante a renderização. Verifique os logs do servidor.';
-  }
+  }, []);
+
+  useEffect(() => {
+    fetchMessages();
+    fetchClients();
+  }, [fetchMessages, fetchClients]);
+
+  const updateFilters = (newFilters: Record<string, string>) => {
+    const params = new URLSearchParams(searchParams.toString());
+    Object.entries(newFilters).forEach(([key, value]) => {
+      if (value) {
+        params.set(key, value);
+      } else {
+        params.delete(key);
+      }
+    });
+    // Reset page on filter change
+    if (!newFilters.page) params.set('page', '1');
+    router.push(`/app/messages?${params.toString()}`);
+  };
 
   return (
     <div className="space-y-8">
@@ -110,7 +114,11 @@ export default async function MessagesPage({
         <div className="flex flex-col md:flex-row gap-4">
           <div className="relative flex-1">
             <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
-            <form action="/app/messages" method="GET">
+            <form onSubmit={(e) => {
+              e.preventDefault();
+              const formData = new FormData(e.currentTarget);
+              updateFilters({ q: formData.get('q') as string });
+            }}>
               <input
                 type="text"
                 name="q"
@@ -118,19 +126,13 @@ export default async function MessagesPage({
                 placeholder="Pesquisar no conteúdo das mensagens..."
                 className="w-full rounded-lg border border-slate-300 pl-10 pr-4 py-2 text-sm focus:border-indigo-500 focus:ring-indigo-500"
               />
-              {phone && <input type="hidden" name="phone" value={phone} />}
-              {instance && <input type="hidden" name="instance" value={instance} />}
-              {direction !== 'all' && <input type="hidden" name="direction" value={direction} />}
             </form>
           </div>
           
           <div className="flex flex-wrap items-center gap-2">
             <select 
               className="rounded-lg border border-slate-300 px-3 py-2 text-sm focus:border-indigo-500 focus:ring-indigo-500"
-              onChange={(e) => {
-                const val = e.target.value;
-                window.location.href = `/app/messages?phone=${val}${query ? `&q=${query}` : ''}${direction !== 'all' ? `&direction=${direction}` : ''}`;
-              }}
+              onChange={(e) => updateFilters({ phone: e.target.value })}
               value={phone}
             >
               <option value="">Todos os Clientes</option>
@@ -141,10 +143,7 @@ export default async function MessagesPage({
 
             <select 
               className="rounded-lg border border-slate-300 px-3 py-2 text-sm focus:border-indigo-500 focus:ring-indigo-500"
-              onChange={(e) => {
-                const val = e.target.value;
-                window.location.href = `/app/messages?direction=${val}${query ? `&q=${query}` : ''}${phone ? `&phone=${phone}` : ''}`;
-              }}
+              onChange={(e) => updateFilters({ direction: e.target.value })}
               value={direction}
             >
               <option value="all">Todas as Direções</option>
@@ -156,7 +155,16 @@ export default async function MessagesPage({
       </div>
 
       {/* Messages List */}
-      <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+      <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden relative min-h-[400px]">
+        {loading && (
+          <div className="absolute inset-0 bg-white/50 backdrop-blur-[1px] z-10 flex items-center justify-center">
+            <div className="flex flex-col items-center gap-2">
+              <Loader2 className="h-8 w-8 text-indigo-600 animate-spin" />
+              <p className="text-xs text-slate-500 font-medium">A carregar mensagens...</p>
+            </div>
+          </div>
+        )}
+
         <div className="overflow-x-auto">
           <table className="w-full text-left border-collapse">
             <thead className="bg-slate-50 text-[10px] font-bold uppercase tracking-wider text-slate-500 border-b border-slate-200">
@@ -172,7 +180,7 @@ export default async function MessagesPage({
               {messages?.map((msg) => (
                 <MessageRow key={msg.id} message={msg} clients={clients || []} />
               ))}
-              {(!messages || messages.length === 0) && (
+              {!loading && (!messages || messages.length === 0) && (
                 <tr>
                   <td colSpan={5} className="px-6 py-12 text-center">
                     <div className="flex flex-col items-center justify-center">
@@ -189,29 +197,31 @@ export default async function MessagesPage({
         </div>
 
         {/* Pagination */}
-        {count && count > pageSize && (
+        {count > pageSize && (
           <div className="p-4 border-t border-slate-100 flex items-center justify-between bg-slate-50/50">
             <p className="text-xs text-slate-500">
               A mostrar <span className="font-bold">{(page - 1) * pageSize + 1}</span> a <span className="font-bold">{Math.min(page * pageSize, count)}</span> de <span className="font-bold">{count}</span> mensagens
             </p>
             <div className="flex gap-2">
-              <Link
-                href={`/app/messages?page=${page - 1}${query ? `&q=${query}` : ''}${phone ? `&phone=${phone}` : ''}${direction !== 'all' ? `&direction=${direction}` : ''}`}
-                className={`p-2 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 transition ${page === 1 ? 'pointer-events-none opacity-50' : ''}`}
+              <button
+                onClick={() => updateFilters({ page: (page - 1).toString() })}
+                disabled={page === 1 || loading}
+                className={`p-2 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 transition disabled:opacity-50 disabled:pointer-events-none`}
               >
                 <ChevronLeft className="h-4 w-4" />
-              </Link>
-              <Link
-                href={`/app/messages?page=${page + 1}${query ? `&q=${query}` : ''}${phone ? `&phone=${phone}` : ''}${direction !== 'all' ? `&direction=${direction}` : ''}`}
-                className={`p-2 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 transition ${page * pageSize >= count ? 'pointer-events-none opacity-50' : ''}`}
+              </button>
+              <button
+                onClick={() => updateFilters({ page: (page + 1).toString() })}
+                disabled={page * pageSize >= count || loading}
+                className={`p-2 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 transition disabled:opacity-50 disabled:pointer-events-none`}
               >
                 <ChevronRight className="h-4 w-4" />
-              </Link>
+              </button>
             </div>
           </div>
         )}
       </div>
-      <DebugPanel endpoint={endpoint} error={error} hint={hint} data={messages} />
+      <DebugPanel endpoint={`/api/messages`} error={error} hint={hint} data={messages} />
     </div>
   );
 }

@@ -110,7 +110,7 @@ export default function ClientDetailsPage({
   const fetchMessages = async (phone: string) => {
     if (!phone) return;
     try {
-      const res = await fetch(`/api/admin/messages?phone=${phone}&page=${msgPage}&limit=${pageSize}`);
+      const res = await fetch(`/api/messages?phone=${phone}&page=${msgPage}&limit=${pageSize}`);
       if (!res.ok) throw new Error('Erro ao carregar mensagens');
       const data = await res.json();
       setRecentMessages(data.messages || []);
