@@ -55,7 +55,10 @@ export async function PATCH(
     // Add aliases for common schema variations
     const payload = { ...body };
     if (payload.company_name && !payload.name) payload.name = payload.company_name;
-    if (payload.trial_ends_at && !payload.trial_expires_at) payload.trial_expires_at = payload.trial_ends_at;
+    if (payload.trial_end && !payload.trial_ends_at) payload.trial_ends_at = payload.trial_end;
+    if (payload.trial_ends_at && !payload.trial_end) payload.trial_end = payload.trial_ends_at;
+    if (payload.bot_instructions && !payload.system_prompt) payload.system_prompt = payload.bot_instructions;
+    if (payload.system_prompt && !payload.bot_instructions) payload.bot_instructions = payload.system_prompt;
     if (payload.instance_name && !payload.instance_id) payload.instance_id = payload.instance_name;
 
     const supabase = createAdminClient();
@@ -75,6 +78,8 @@ export async function PATCH(
         if (body.company_name || body.name) minimalPayload.company_name = body.company_name || body.name;
         if (body.phone_e164 || body.phone) minimalPayload.phone_e164 = body.phone_e164 || body.phone;
         if (body.status) minimalPayload.status = body.status;
+        if (body.trial_end || body.trial_ends_at) minimalPayload.trial_end = body.trial_end || body.trial_ends_at;
+        if (body.bot_instructions || body.system_prompt) minimalPayload.bot_instructions = body.bot_instructions || body.system_prompt;
         
         const { data: retryData, error: retryError } = await supabase
           .from('clients')

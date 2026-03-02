@@ -27,22 +27,24 @@ export async function GET(request: Request) {
       dbQuery = dbQuery.or(`company_name.ilike.%${query}%,phone_e164.ilike.%${query}%`);
     }
 
-    const { data, error } = await dbQuery.order('updated_at', { ascending: false });
+    // Try to order by trial_end or id if updated_at doesn't exist
+    const { data, error } = await dbQuery.order('id', { ascending: false });
 
     if (error) {
       console.error('Supabase Clients Error:', error);
       // Fallback: try to select only columns we are reasonably sure about
       const { data: fallbackData, error: fallbackError } = await supabase
         .from('clients')
-        .select('id, status, created_at')
-        .order('created_at', { ascending: false });
+        .select('id, status')
+        .order('id', { ascending: false });
       
       if (fallbackError) throw fallbackError;
       
       return NextResponse.json(fallbackData.map((c: any) => ({
         ...c,
         company_name: c.company_name || c.name || 'Empresa sem nome',
-        phone_e164: c.phone_e164 || c.phone || 'N/A'
+        phone_e164: c.phone_e164 || c.phone || 'N/A',
+        trial_end: c.trial_end || c.trial_ends_at || null
       })));
     }
 
@@ -52,7 +54,8 @@ export async function GET(request: Request) {
       company_name: c.company_name || c.name || '',
       phone_e164: c.phone_e164 || c.phone || '',
       instance_name: c.instance_name || c.instance_id || '',
-      trial_ends_at: c.trial_ends_at || c.trial_expires_at || c.trial_end || null
+      trial_end: c.trial_end || c.trial_ends_at || c.trial_expires_at || null,
+      bot_instructions: c.bot_instructions || c.system_prompt || ''
     })) || [];
 
     return NextResponse.json(mappedClients);

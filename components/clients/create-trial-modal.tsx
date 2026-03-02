@@ -10,7 +10,7 @@ export function CreateTrialModal({ isOpen, onClose }: { isOpen: boolean; onClose
   const [phoneE164, setPhoneE164] = useState('');
   const [instanceName, setInstanceName] = useState('');
   const [status, setStatus] = useState('trial');
-  const [trialEndsAt, setTrialEndsAt] = useState(() => {
+  const [trialEnd, setTrialEnd] = useState(() => {
     const d = new Date();
     d.setDate(d.getDate() + 3);
     return d.toISOString().split('T')[0];
@@ -38,8 +38,8 @@ export function CreateTrialModal({ isOpen, onClose }: { isOpen: boolean; onClose
       phone_e164: normalizedPhone,
       instance_name: instanceName || companyName.toLowerCase().replace(/\s+/g, '_'),
       status: status,
-      trial_ends_at: new Date(trialEndsAt).toISOString(),
-      system_prompt: 'Olá! Como posso ajudar?',
+      trial_end: new Date(trialEnd).toISOString(),
+      bot_instructions: 'Olá! Como posso ajudar?',
       updated_at: new Date().toISOString()
     };
 
@@ -123,8 +123,8 @@ export function CreateTrialModal({ isOpen, onClose }: { isOpen: boolean; onClose
               <label className="block text-xs font-bold text-slate-500 uppercase tracking-wider mb-1">Expira em</label>
               <input
                 type="date"
-                value={trialEndsAt}
-                onChange={(e) => setTrialEndsAt(e.target.value)}
+                value={trialEnd}
+                onChange={(e) => setTrialEnd(e.target.value)}
                 className="block w-full rounded-lg border border-slate-300 px-4 py-2 text-sm focus:border-indigo-500 focus:ring-indigo-500"
               />
             </div>

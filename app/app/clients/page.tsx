@@ -3,6 +3,7 @@ import { Edit2, ExternalLink, Copy, Zap, Search, Plus, Filter, AlertCircle } fro
 import { ClientActionButtons } from '@/components/clients/client-action-buttons';
 import { ClientQuickActions } from '@/components/clients/client-quick-actions';
 import { DebugPanel } from '@/components/debug-panel';
+import { getBaseUrl } from '@/lib/baseUrl';
 
 export const dynamic = 'force-dynamic';
 
@@ -15,7 +16,7 @@ export default async function ClientsPage({
   const query = searchParams.q || '';
 
   // Get base URL for server-side fetch
-  const baseUrl = process.env.APP_URL || 'http://localhost:3000';
+  const baseUrl = getBaseUrl();
   const endpoint = `${baseUrl}/api/admin/clients?status=${status}&q=${query}`;
   
   let clients: any[] = [];
@@ -39,10 +40,10 @@ export default async function ClientsPage({
     if (!res.ok) {
       const errorMsg = data.error || 'Erro ao carregar clientes';
       const isPermissionError = errorMsg.toLowerCase().includes('permission') || 
-                               errorMsg.toLowerCase().includes('rls') || 
-                               errorMsg.toLowerCase().includes('policy') ||
-                               errorMsg.toLowerCase().includes('not found') ||
-                               errorMsg.toLowerCase().includes('relation');
+                                errorMsg.toLowerCase().includes('rls') || 
+                                errorMsg.toLowerCase().includes('policy') ||
+                                errorMsg.toLowerCase().includes('not found') ||
+                                errorMsg.toLowerCase().includes('relation');
       
       error = errorMsg;
       if (isPermissionError) {
@@ -131,7 +132,6 @@ export default async function ClientsPage({
                 <th className="px-6 py-4">Instância</th>
                 <th className="px-6 py-4">Status</th>
                 <th className="px-6 py-4">Expira em</th>
-                <th className="px-6 py-4">Última Atualiz.</th>
                 <th className="px-6 py-4 text-right">Ações</th>
               </tr>
             </thead>
@@ -142,7 +142,7 @@ export default async function ClientsPage({
                     <div className="font-semibold text-slate-900">
                       {renderCell(client, ['company_name', 'name'])}
                     </div>
-                    <div className="text-[10px] text-slate-400 font-mono mt-0.5">ID: {client.id.substring(0, 8)}...</div>
+                    <div className="text-[10px] text-slate-400 font-mono mt-0.5">ID: {String(client.id).substring(0, 8)}...</div>
                   </td>
                   <td className="px-6 py-4 font-mono text-xs">
                     {renderCell(client, ['phone_e164', 'phone'])}
@@ -162,21 +162,18 @@ export default async function ClientsPage({
                     </span>
                   </td>
                   <td className="px-6 py-4 whitespace-nowrap">
-                    {client.trial_ends_at || client.trial_end ? (
+                    {client.trial_end || client.trial_ends_at ? (
                       <div className="flex flex-col">
                         <span className="text-slate-900 font-medium">
-                          {new Date(client.trial_ends_at || client.trial_end).toLocaleDateString('pt-PT')}
+                          {new Date(client.trial_end || client.trial_ends_at).toLocaleDateString('pt-PT')}
                         </span>
                         <span className="text-[10px] text-slate-400">
-                          {new Date(client.trial_ends_at || client.trial_end) < new Date() ? 'Expirado' : 'Válido'}
+                          {new Date(client.trial_end || client.trial_ends_at) < new Date() ? 'Expirado' : 'Válido'}
                         </span>
                       </div>
                     ) : (
                       <span className="text-slate-400">-</span>
                     )}
-                  </td>
-                  <td className="px-6 py-4 text-xs text-slate-500">
-                    {client.updated_at ? new Date(client.updated_at).toLocaleString('pt-PT', { dateStyle: 'short', timeStyle: 'short' }) : '-'}
                   </td>
                   <td className="px-6 py-4 text-right">
                     <ClientQuickActions client={client} />
@@ -185,7 +182,7 @@ export default async function ClientsPage({
               ))}
               {(!clients || clients.length === 0) && (
                 <tr>
-                  <td colSpan={7} className="px-6 py-12 text-center">
+                  <td colSpan={6} className="px-6 py-12 text-center">
                     <div className="flex flex-col items-center justify-center">
                       <div className="h-12 w-12 rounded-full bg-slate-100 flex items-center justify-center mb-3">
                         <Users className="h-6 w-6 text-slate-400" />

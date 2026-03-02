@@ -23,8 +23,9 @@ export function ClientQuickActions({ client }: { client: any }) {
   };
 
   const copyPrompt = () => {
-    if (client.system_prompt) {
-      navigator.clipboard.writeText(client.system_prompt);
+    const prompt = client.bot_instructions || client.system_prompt;
+    if (prompt) {
+      navigator.clipboard.writeText(prompt);
       setCopiedPrompt(true);
       setTimeout(() => setCopiedPrompt(false), 2000);
     }
@@ -41,7 +42,9 @@ export function ClientQuickActions({ client }: { client: any }) {
         updated_at: new Date().toISOString()
       };
       
-      if (client.trial_ends_at !== undefined) {
+      if (client.trial_end !== undefined) {
+        updates.trial_end = newTrialEnd.toISOString();
+      } else if (client.trial_ends_at !== undefined) {
         updates.trial_ends_at = newTrialEnd.toISOString();
       } else {
         updates.trial_end = newTrialEnd.toISOString();

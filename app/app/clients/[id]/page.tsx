@@ -57,8 +57,8 @@ export default function ClientDetailsPage({
   const [phoneE164, setPhoneE164] = useState('');
   const [instanceName, setInstanceName] = useState('');
   const [status, setStatus] = useState('');
-  const [trialEndsAt, setTrialEndsAt] = useState('');
-  const [systemPrompt, setSystemPrompt] = useState('');
+  const [trialEnd, setTrialEnd] = useState('');
+  const [botInstructions, setBotInstructions] = useState('');
   const [forcePTPT, setForcePTPT] = useState(false);
   const [mapsUrl, setMapsUrl] = useState('');
   const [testPhone, setTestPhone] = useState('');
@@ -85,12 +85,16 @@ export default function ClientDetailsPage({
           setPhoneE164(clientData.phone_e164 || clientData.phone || '');
           setInstanceName(clientData.instance_name || '');
           setStatus(clientData.status || 'trial');
-          setTrialEndsAt(clientData.trial_ends_at ? clientData.trial_ends_at.split('T')[0] : (clientData.trial_end ? clientData.trial_end.split('T')[0] : ''));
-          setSystemPrompt(clientData.system_prompt || '');
+          
+          const tEnd = clientData.trial_end || clientData.trial_ends_at || clientData.trial_end_at;
+          setTrialEnd(tEnd ? tEnd.split('T')[0] : '');
+          
+          const instructions = clientData.bot_instructions || clientData.system_prompt || '';
+          setBotInstructions(instructions);
           setTestPhone(clientData.phone_e164 || clientData.phone || '');
           
           // Check if "Responde sempre em Português de Portugal." is in the prompt
-          if (clientData.system_prompt?.includes('Responde sempre em Português de Portugal.')) {
+          if (instructions.includes('Responde sempre em Português de Portugal.')) {
             setForcePTPT(true);
           }
 
@@ -138,7 +142,7 @@ export default function ClientDetailsPage({
         phone_e164: normalizedPhone,
         instance_name: instanceName,
         status: status,
-        trial_ends_at: trialEndsAt ? new Date(trialEndsAt).toISOString() : null,
+        trial_end: trialEnd ? new Date(trialEnd).toISOString() : null,
         updated_at: new Date().toISOString()
       };
 
@@ -161,7 +165,7 @@ export default function ClientDetailsPage({
   const handleSavePrompt = async () => {
     setSaving(true);
     try {
-      let finalPrompt = systemPrompt;
+      let finalPrompt = botInstructions;
       const ptSuffix = '\n\nResponde sempre em Português de Portugal.';
       
       if (forcePTPT && !finalPrompt.includes(ptSuffix)) {
@@ -174,13 +178,13 @@ export default function ClientDetailsPage({
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          system_prompt: finalPrompt,
+          bot_instructions: finalPrompt,
           updated_at: new Date().toISOString()
         }),
       });
       if (!res.ok) throw new Error('Erro ao salvar prompt');
       
-      setSystemPrompt(finalPrompt);
+      setBotInstructions(finalPrompt);
       alert('Prompt salvo com sucesso!');
       router.refresh();
     } catch (error: any) {
@@ -193,7 +197,7 @@ export default function ClientDetailsPage({
   const handleRenew3Days = async () => {
     const d = new Date();
     d.setDate(d.getDate() + 3);
-    setTrialEndsAt(d.toISOString().split('T')[0]);
+    setTrialEnd(d.toISOString().split('T')[0]);
     setStatus('trial');
     // We don't save automatically, let the user click Save or we can do it
     alert('Data de expiração alterada para daqui a 3 dias. Clique em "Guardar Dados" para confirmar.');
@@ -223,7 +227,7 @@ export default function ClientDetailsPage({
       const promptData = await promptRes.json();
       if (!promptRes.ok) throw new Error(promptData.error);
 
-      setSystemPrompt(promptData.prompt);
+      setBotInstructions(promptData.prompt);
       alert('Prompt gerado com sucesso! Reveja e clique em "Guardar Prompt".');
     } catch (error: any) {
       alert('Erro: ' + error.message);
@@ -384,8 +388,8 @@ export default function ClientDetailsPage({
                     <label className="block text-xs font-bold text-slate-500 uppercase tracking-wider mb-1">Expira em</label>
                     <input 
                       type="date" 
-                      value={trialEndsAt}
-                      onChange={(e) => setTrialEndsAt(e.target.value)}
+                      value={trialEnd}
+                      onChange={(e) => setTrialEnd(e.target.value)}
                       className="w-full rounded-lg border border-slate-300 px-4 py-2 text-sm focus:border-indigo-500 focus:ring-indigo-500"
                     />
                   </div>
@@ -428,15 +432,15 @@ export default function ClientDetailsPage({
             <div className="p-6 space-y-4">
               <div className="relative">
                 <textarea 
-                  value={systemPrompt}
-                  onChange={(e) => setSystemPrompt(e.target.value)}
+                  value={botInstructions}
+                  onChange={(e) => setBotInstructions(e.target.value)}
                   className="w-full h-[500px] rounded-xl border border-slate-300 p-4 font-mono text-xs leading-relaxed focus:border-indigo-500 focus:ring-indigo-500 bg-slate-50/50"
                   placeholder="Instruções detalhadas para o bot..."
                 />
                 <div className="absolute bottom-4 right-4 flex gap-2">
                   <button 
                     onClick={() => {
-                      navigator.clipboard.writeText(systemPrompt);
+                      navigator.clipboard.writeText(botInstructions);
                       alert('Prompt copiado!');
                     }}
                     className="p-2 bg-white border border-slate-200 rounded-lg shadow-sm hover:bg-slate-50 transition text-slate-500"
@@ -447,7 +451,7 @@ export default function ClientDetailsPage({
                   <button 
                     onClick={() => {
                       if (confirm('Deseja repor o prompt para o template padrão?')) {
-                        setSystemPrompt('Olá! Sou o assistente virtual da ' + companyName + '. Como posso ajudar?');
+                        setBotInstructions('Olá! Sou o assistente virtual da ' + companyName + '. Como posso ajudar?');
                       }
                     }}
                     className="p-2 bg-white border border-slate-200 rounded-lg shadow-sm hover:bg-slate-50 transition text-slate-500"

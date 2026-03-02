@@ -6,11 +6,12 @@ import {
 import Link from 'next/link';
 import { StatsCard } from '@/components/stats-card';
 import { DebugPanel } from '@/components/debug-panel';
+import { getBaseUrl } from '@/lib/baseUrl';
 
 export const dynamic = 'force-dynamic';
 
 export default async function DashboardPage() {
-  const baseUrl = process.env.APP_URL || 'http://localhost:3000';
+  const baseUrl = getBaseUrl();
   const endpoint = `${baseUrl}/api/admin/stats`;
   
   let stats = {

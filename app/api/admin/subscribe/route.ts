@@ -78,6 +78,7 @@ export async function POST(request: Request) {
       .update({
         instance_name: instanceName,
         status: 'active',
+        trial_end: null,
         trial_ends_at: null,
         updated_at: new Date().toISOString()
       })
