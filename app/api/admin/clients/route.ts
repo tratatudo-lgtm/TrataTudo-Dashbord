@@ -54,6 +54,7 @@ export async function GET(request: Request) {
       company_name: c.company_name || c.name || '',
       phone_e164: c.phone_e164 || c.phone || '',
       instance_name: c.instance_name || c.instance_id || '',
+      production_instance_name: c.production_instance_name || '',
       trial_end: c.trial_end || c.trial_ends_at || c.trial_expires_at || null,
       bot_instructions: c.bot_instructions || c.system_prompt || ''
     })) || [];

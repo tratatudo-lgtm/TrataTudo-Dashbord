@@ -6,12 +6,13 @@ import {
   Loader2, Zap, ShieldCheck, FileText, Clock, 
   Sparkles, Send, Copy, RefreshCw, Check, X,
   ChevronLeft, ChevronRight, MessageSquare, Terminal,
-  AlertCircle
+  AlertCircle, Smartphone
 } from 'lucide-react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { normalizeE164 } from '@/lib/phone';
 import { DebugPanel } from '@/components/debug-panel';
+import { ProductionInstanceModal } from '@/components/clients/production-instance-modal';
 
 export default function ClientDetailsPage({
   params,
@@ -28,6 +29,7 @@ export default function ClientDetailsPage({
   const [testResult, setTestResult] = useState<{ success: boolean; message: string; log?: any } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [hint, setHint] = useState<string | undefined>(undefined);
+  const [isProductionModalOpen, setIsProductionModalOpen] = useState(false);
   
   const endpoint = `/api/admin/clients/${params.id}`;
 
@@ -56,6 +58,7 @@ export default function ClientDetailsPage({
   const [companyName, setCompanyName] = useState('');
   const [phoneE164, setPhoneE164] = useState('');
   const [instanceName, setInstanceName] = useState('');
+  const [productionInstanceName, setProductionInstanceName] = useState('');
   const [status, setStatus] = useState('');
   const [trialEnd, setTrialEnd] = useState('');
   const [botInstructions, setBotInstructions] = useState('');
@@ -84,6 +87,7 @@ export default function ClientDetailsPage({
           setCompanyName(clientData.company_name || clientData.name || '');
           setPhoneE164(clientData.phone_e164 || clientData.phone || '');
           setInstanceName(clientData.instance_name || '');
+          setProductionInstanceName(clientData.production_instance_name || '');
           setStatus(clientData.status || 'trial');
           
           const tEnd = clientData.trial_end || clientData.trial_ends_at || clientData.trial_end_at;
@@ -141,6 +145,7 @@ export default function ClientDetailsPage({
         company_name: companyName,
         phone_e164: normalizedPhone,
         instance_name: instanceName,
+        production_instance_name: productionInstanceName,
         status: status,
         trial_end: trialEnd ? new Date(trialEnd).toISOString() : null,
         updated_at: new Date().toISOString()
@@ -328,6 +333,15 @@ export default function ClientDetailsPage({
                     Ativar Plano
                   </button>
                 )}
+                {status === 'active' && !client?.production_instance_name && (
+                  <button 
+                    onClick={() => setIsProductionModalOpen(true)}
+                    className="flex items-center gap-2 px-4 py-1.5 text-sm font-bold text-white bg-rose-600 rounded-lg hover:bg-rose-700 transition shadow-sm"
+                  >
+                    <Smartphone className="h-4 w-4" />
+                    Portar / Criar Instância
+                  </button>
+                )}
                 <button 
                   onClick={handleRenew3Days}
                   className="px-3 py-1.5 text-xs font-semibold text-amber-700 bg-amber-50 border border-amber-100 rounded-lg hover:bg-amber-100 transition"
@@ -367,12 +381,22 @@ export default function ClientDetailsPage({
               </div>
               <div className="space-y-4">
                 <div>
-                  <label className="block text-xs font-bold text-slate-500 uppercase tracking-wider mb-1">Instância Evolution</label>
+                  <label className="block text-xs font-bold text-slate-500 uppercase tracking-wider mb-1">Instância Evolution (Teste)</label>
                   <input 
                     type="text" 
                     value={instanceName}
                     onChange={(e) => setInstanceName(e.target.value)}
                     className="w-full rounded-lg border border-slate-300 px-4 py-2 text-sm focus:border-indigo-500 focus:ring-indigo-500 font-mono"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-bold text-slate-500 uppercase tracking-wider mb-1">Instância Evolution (Produção)</label>
+                  <input 
+                    type="text" 
+                    value={productionInstanceName}
+                    onChange={(e) => setProductionInstanceName(e.target.value)}
+                    className="w-full rounded-lg border border-slate-300 px-4 py-2 text-sm focus:border-indigo-500 focus:ring-indigo-500 font-mono bg-slate-50"
+                    readOnly
                   />
                 </div>
                 <div className="grid grid-cols-2 gap-4">
@@ -632,8 +656,12 @@ export default function ClientDetailsPage({
             <h3 className="text-sm font-bold uppercase tracking-widest text-indigo-400 mb-4">Estado da Instância</h3>
             <div className="space-y-3">
               <div className="flex justify-between items-center text-xs">
-                <span className="text-slate-400">Nome:</span>
+                <span className="text-slate-400">Teste:</span>
                 <span className="font-mono font-bold">{instanceName || 'N/A'}</span>
+              </div>
+              <div className="flex justify-between items-center text-xs">
+                <span className="text-slate-400">Produção:</span>
+                <span className="font-mono font-bold text-emerald-400">{productionInstanceName || 'N/A'}</span>
               </div>
               <div className="flex justify-between items-center text-xs">
                 <span className="text-slate-400">Ligação:</span>
@@ -646,6 +674,18 @@ export default function ClientDetailsPage({
           </section>
         </div>
       </div>
+
+      <ProductionInstanceModal 
+        isOpen={isProductionModalOpen}
+        onClose={() => setIsProductionModalOpen(false)}
+        clientId={params.id}
+        clientName={companyName}
+        onSuccess={(name) => {
+          setInstanceName(name);
+          setStatus('active');
+          window.location.reload();
+        }}
+      />
     </div>
   );
 }

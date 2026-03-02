@@ -80,6 +80,7 @@ export async function PATCH(
         if (body.status) minimalPayload.status = body.status;
         if (body.trial_end || body.trial_ends_at) minimalPayload.trial_end = body.trial_end || body.trial_ends_at;
         if (body.bot_instructions || body.system_prompt) minimalPayload.bot_instructions = body.bot_instructions || body.system_prompt;
+        if (body.production_instance_name) minimalPayload.production_instance_name = body.production_instance_name;
         
         const { data: retryData, error: retryError } = await supabase
           .from('clients')

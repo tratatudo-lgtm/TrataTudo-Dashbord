@@ -20,33 +20,62 @@ export async function POST(request: Request) {
 
     const instanceName = body.instance;
     const rawSenderPhone = body.data.key.remoteJid.split('@')[0]; // User's phone
-    const botPhone = body.data.key.participant || ''; // Might be bot's phone in groups, or empty
     const text = message.conversation || message.extendedTextMessage?.text || '';
 
     if (!text) return NextResponse.json({ ok: true, message: 'No text content' });
 
-    const senderPhone = normalizeE164(rawSenderPhone) || rawSenderPhone;
+    const senderPhone = normalizeE164(rawSenderPhone) || ('+' + rawSenderPhone.replace(/\D/g, ''));
+    console.log(`[Webhook] Instance: ${instanceName} | Sender: ${senderPhone}`);
 
     const supabase = createAdminClient();
+    let client: any = null;
+    const hubInstanceName = process.env.HUB_INSTANCE_NAME || 'HUB';
 
-    // C3) Lookup robusto
-    // 1. Tentar por instance_name
-    let { data: client, error: clientError } = await supabase
-      .from('clients')
-      .select('*')
-      .eq('instance_name', instanceName)
-      .single();
-
-    // 2. Fallback: Tentar por phone_e164 (se tivermos o número do bot)
-    // Nota: nem sempre o Evolution manda o número do bot no webhook de forma fácil
-    if (!client && botPhone) {
-      const formattedBotPhone = '+' + botPhone.replace(/\D/g, '');
-      const { data: clientByPhone } = await supabase
+    if (instanceName === hubInstanceName) {
+      const { data: hubClient } = await supabase
         .from('clients')
         .select('*')
-        .eq('phone_e164', formattedBotPhone)
+        .eq('phone_e164', senderPhone)
         .single();
-      client = clientByPhone;
+
+      if (hubClient) {
+        console.log(`[HUB] Client found: ${hubClient.company_name} (${hubClient.status})`);
+        const now = new Date();
+        const trialEnd = hubClient.trial_end ? new Date(hubClient.trial_end) : null;
+        const isTrialValid = hubClient.status === 'trial' && trialEnd && trialEnd > now;
+        const isActive = hubClient.status === 'active';
+
+        if (isActive || isTrialValid) {
+          client = hubClient;
+        } else {
+          console.log(`[HUB] Client ${senderPhone} expired or inactive.`);
+          await sendEvolutionMessage(instanceName, senderPhone, "Número não reconhecido ou teste expirado...");
+          return NextResponse.json({ ok: true, message: 'Expired/Inactive' });
+        }
+      } else {
+        console.log(`[HUB] Client NOT found for phone: ${senderPhone}`);
+        await sendEvolutionMessage(instanceName, senderPhone, "Número não reconhecido ou teste expirado...");
+        return NextResponse.json({ ok: true, message: 'Not found' });
+      }
+    } else {
+      // Production instance logic: identify by production_instance_name
+      let { data: prodClient } = await supabase
+        .from('clients')
+        .select('*')
+        .eq('production_instance_name', instanceName)
+        .single();
+
+      // Fallback to instance_name if production_instance_name not found
+      if (!prodClient) {
+        let { data: dedicatedClient } = await supabase
+          .from('clients')
+          .select('*')
+          .eq('instance_name', instanceName)
+          .single();
+        prodClient = dedicatedClient;
+      }
+
+      client = prodClient;
     }
 
     if (!client) {
@@ -80,21 +109,7 @@ export async function POST(request: Request) {
     const aiResponse = groqData.text;
 
     // Send response back via Evolution
-    const evoUrl = process.env.EVOLUTION_API_URL;
-    const evoKey = process.env.EVOLUTION_API_KEY;
-
-    await fetch(`${evoUrl}/message/sendText/${instanceName}`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'apikey': evoKey!
-      },
-      body: JSON.stringify({
-        number: senderPhone,
-        text: aiResponse,
-        delay: 1000
-      })
-    });
+    await sendEvolutionMessage(instanceName, senderPhone, aiResponse);
 
     // Log outgoing message
     await supabase.from('messages').insert({
@@ -110,5 +125,32 @@ export async function POST(request: Request) {
   } catch (error: any) {
     console.error('Webhook Error:', error);
     return NextResponse.json({ error: error.message }, { status: 500 });
+  }
+}
+
+async function sendEvolutionMessage(instanceName: string, number: string, text: string) {
+  const evoUrl = process.env.EVOLUTION_API_URL;
+  const evoKey = process.env.EVOLUTION_API_KEY;
+
+  if (!evoUrl || !evoKey) {
+    console.error('Evolution API credentials missing');
+    return;
+  }
+
+  try {
+    await fetch(`${evoUrl}/message/sendText/${instanceName}`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'apikey': evoKey
+      },
+      body: JSON.stringify({
+        number: number.replace('+', ''),
+        text: text,
+        delay: 1000
+      })
+    });
+  } catch (error) {
+    console.error('Error sending Evolution message:', error);
   }
 }
