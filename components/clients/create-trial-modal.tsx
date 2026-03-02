@@ -6,8 +6,9 @@ import { X } from 'lucide-react';
 import { useRouter } from 'next/navigation';
 
 export function CreateTrialModal({ isOpen, onClose }: { isOpen: boolean; onClose: () => void }) {
-  const [name, setName] = useState('');
-  const [phone, setPhone] = useState('');
+  const [companyName, setCompanyName] = useState('');
+  const [phoneE164, setPhoneE164] = useState('');
+  const [instanceName, setInstanceName] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const router = useRouter();
@@ -21,26 +22,33 @@ export function CreateTrialModal({ isOpen, onClose }: { isOpen: boolean; onClose
     setError(null);
 
     // Validação básica de telefone E.164
-    if (!phone.startsWith('+')) {
+    if (!phoneE164.startsWith('+')) {
       setError('O telefone deve começar com + (ex: +351912345678)');
       setLoading(false);
       return;
     }
 
-    const trialEnd = new Date();
-    trialEnd.setDate(trialEnd.getDate() + 3);
+    const trialEndsAt = new Date();
+    trialEndsAt.setDate(trialEndsAt.getDate() + 3);
 
-    const { error: dbError } = await supabase.from('clients').insert({
-      name,
-      phone,
+    const payload: any = {
+      company_name: companyName,
+      phone_e164: phoneE164,
+      instance_name: instanceName || companyName.toLowerCase().replace(/\s+/g, '_'),
       status: 'trial',
-      trial_start: new Date().toISOString(),
-      trial_end: trialEnd.toISOString(),
+      trial_ends_at: trialEndsAt.toISOString(),
       system_prompt: 'Olá! Como posso ajudar?',
-    });
+    };
+
+    // Fallback for old schema if new columns fail (optional, but let's try to be smart)
+    // Actually, the user said "Não inventes tabelas novas: usa as existentes".
+    // I'll just try to insert with the new names.
+    const { error: dbError } = await supabase.from('clients').insert(payload);
 
     if (dbError) {
-      setError(dbError.message);
+      // If it fails because of missing columns, try the old ones as a last resort?
+      // No, the user wants to see "coluna em falta" in UI, so if insert fails, it fails.
+      setError(`Erro ao criar cliente: ${dbError.message}. Verifique se as colunas existem no Supabase.`);
       setLoading(false);
     } else {
       onClose();
@@ -64,8 +72,8 @@ export function CreateTrialModal({ isOpen, onClose }: { isOpen: boolean; onClose
             <input
               type="text"
               required
-              value={name}
-              onChange={(e) => setName(e.target.value)}
+              value={companyName}
+              onChange={(e) => setCompanyName(e.target.value)}
               className="mt-1 block w-full rounded-lg border border-slate-300 px-4 py-2 focus:border-indigo-500 focus:ring-indigo-500"
               placeholder="Ex: Café Central"
             />
@@ -76,10 +84,21 @@ export function CreateTrialModal({ isOpen, onClose }: { isOpen: boolean; onClose
             <input
               type="text"
               required
-              value={phone}
-              onChange={(e) => setPhone(e.target.value)}
+              value={phoneE164}
+              onChange={(e) => setPhoneE164(e.target.value)}
               className="mt-1 block w-full rounded-lg border border-slate-300 px-4 py-2 focus:border-indigo-500 focus:ring-indigo-500"
               placeholder="+351912345678"
+            />
+          </div>
+
+          <div>
+            <label className="block text-sm font-medium text-slate-700">Nome da Instância (Opcional)</label>
+            <input
+              type="text"
+              value={instanceName}
+              onChange={(e) => setInstanceName(e.target.value)}
+              className="mt-1 block w-full rounded-lg border border-slate-300 px-4 py-2 focus:border-indigo-500 focus:ring-indigo-500"
+              placeholder="Ex: cafe_central_bot"
             />
           </div>
 

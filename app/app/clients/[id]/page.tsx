@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { Calendar, Phone, Building2, Bot, History, Save, Loader2, Zap, ShieldCheck, FileText, Clock } from 'lucide-react';
+import { Calendar, Phone, Building2, Bot, History, Save, Loader2, Zap, ShieldCheck, FileText, Clock, Sparkles } from 'lucide-react';
 import { createClient } from '@/lib/supabase/client';
 import { useRouter } from 'next/navigation';
 
@@ -15,9 +15,11 @@ export default function ClientDetailsPage({
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [activating, setActivating] = useState(false);
+  const [generatingPrompt, setGeneratingPrompt] = useState(false);
   const [systemPrompt, setSystemPrompt] = useState('');
   const [internalNotes, setInternalNotes] = useState('');
   const [status, setStatus] = useState('');
+  const [mapsUrl, setMapsUrl] = useState('');
   const router = useRouter();
   const supabase = createClient();
 
@@ -35,40 +37,116 @@ export default function ClientDetailsPage({
         setInternalNotes(clientData.internal_notes || '');
         setStatus(clientData.status || '');
 
-        const { data: messages } = await supabase
-          .from('messages')
-          .select('*')
-          .eq('phone', clientData.phone)
-          .order('created_at', { ascending: false })
-          .limit(5);
-        
-        setRecentMessages(messages || []);
+        const phone = clientData.phone_e164 || clientData.phone;
+        if (phone) {
+          const { data: messages } = await supabase
+            .from('messages')
+            .select('*')
+            .eq('phone', phone)
+            .order('created_at', { ascending: false })
+            .limit(5);
+          
+          setRecentMessages(messages || []);
+        }
       }
       setLoading(false);
     }
     fetchData();
   }, [params.id, supabase]);
 
-  const handleSave = async () => {
+  const handleSave = async (extraUpdates = {}) => {
     setSaving(true);
     try {
+      const updates: any = {
+        id: params.id,
+        system_prompt: systemPrompt,
+        internal_notes: internalNotes,
+        status: status,
+        ...extraUpdates
+      };
+
+      // Handle potential column name differences
+      if (client.company_name !== undefined) updates.company_name = client.company_name;
+      if (client.phone_e164 !== undefined) updates.phone_e164 = client.phone_e164;
+
       const res = await fetch('/api/clients/update', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          id: params.id,
-          system_prompt: systemPrompt,
-          internal_notes: internalNotes,
-          status: status,
-        }),
+        body: JSON.stringify(updates),
       });
       if (!res.ok) throw new Error('Erro ao salvar');
+      
+      if (Object.keys(extraUpdates).length > 0) {
+        // Refresh local state if we did extra updates
+        const { data: updatedClient } = await supabase.from('clients').select('*').eq('id', params.id).single();
+        if (updatedClient) setClient(updatedClient);
+      }
+
       router.refresh();
       alert('Alterações salvas com sucesso!');
     } catch (error: any) {
       alert(error.message);
     } finally {
       setSaving(false);
+    }
+  };
+
+  const handleRenewTrial = async () => {
+    const newTrialEnd = new Date();
+    newTrialEnd.setDate(newTrialEnd.getDate() + 3);
+    
+    const updates: any = {
+      status: 'trial'
+    };
+    
+    if (client.trial_ends_at !== undefined) {
+      updates.trial_ends_at = newTrialEnd.toISOString();
+    } else {
+      updates.trial_end = newTrialEnd.toISOString();
+    }
+
+    setStatus('trial');
+    await handleSave(updates);
+  };
+
+  const handleGeneratePrompt = async () => {
+    if (!mapsUrl) {
+      const url = prompt('Insira o link do Google Maps para gerar o prompt:');
+      if (!url) return;
+      setMapsUrl(url);
+      generateFromUrl(url);
+    } else {
+      generateFromUrl(mapsUrl);
+    }
+  };
+
+  const generateFromUrl = async (url: string) => {
+    setGeneratingPrompt(true);
+    try {
+      // 1. Get details
+      const detailsRes = await fetch('/api/places/details', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url }),
+      });
+      const details = await detailsRes.json();
+      if (!detailsRes.ok) throw new Error(details.error);
+
+      // 2. Generate prompt
+      const promptRes = await fetch('/api/groq/generate-prompt', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(details),
+      });
+      const promptData = await promptRes.json();
+      if (!promptRes.ok) throw new Error(promptData.error);
+
+      setSystemPrompt(promptData.prompt);
+      alert('Prompt gerado com sucesso! Não se esqueça de salvar.');
+    } catch (error: any) {
+      alert('Erro ao gerar prompt: ' + error.message);
+    } finally {
+      setGeneratingPrompt(false);
     }
   };
 
@@ -109,10 +187,20 @@ export default function ClientDetailsPage({
     <div className="max-w-5xl">
       <div className="mb-8 flex items-center justify-between">
         <div>
-          <h1 className="text-3xl font-bold text-slate-900">{client.name}</h1>
+          <h1 className="text-3xl font-bold text-slate-900">
+            {client.company_name || client.name}
+          </h1>
           <p className="text-slate-500">ID: {client.id}</p>
         </div>
         <div className="flex gap-3">
+          <button 
+            onClick={handleGeneratePrompt}
+            disabled={generatingPrompt}
+            className="flex items-center rounded-lg border border-slate-300 bg-white px-4 py-2 font-semibold text-slate-700 transition hover:bg-slate-50 disabled:opacity-50"
+          >
+            {generatingPrompt ? <Loader2 className="mr-2 h-5 w-5 animate-spin" /> : <Sparkles className="mr-2 h-5 w-5 text-amber-500" />}
+            Gerar Prompt (PT-PT)
+          </button>
           {client.status !== 'active' && (
             <button 
               onClick={handleActivate}
@@ -180,23 +268,33 @@ export default function ClientDetailsPage({
                 <Building2 className="mr-3 h-5 w-5 text-slate-400" />
                 <div>
                   <p className="font-medium text-slate-500">Empresa</p>
-                  <p className="text-slate-900">{client.name}</p>
+                  <p className="text-slate-900">{client.company_name || client.name}</p>
                 </div>
               </div>
               <div className="flex items-center text-sm">
                 <Phone className="mr-3 h-5 w-5 text-slate-400" />
                 <div>
                   <p className="font-medium text-slate-500">Telefone</p>
-                  <p className="text-slate-900 font-mono">{client.phone}</p>
+                  <p className="text-slate-900 font-mono">{client.phone_e164 || client.phone}</p>
                 </div>
               </div>
               <div className="flex items-center text-sm">
                 <Calendar className="mr-3 h-5 w-5 text-slate-400" />
                 <div>
                   <p className="font-medium text-slate-500">Expira em</p>
-                  <p className="text-slate-900">
-                    {client.trial_end ? new Date(client.trial_end).toLocaleDateString('pt-PT') : 'Vitalício'}
-                  </p>
+                  <div className="flex items-center gap-2">
+                    <p className="text-slate-900">
+                      {client.trial_ends_at || client.trial_end 
+                        ? new Date(client.trial_ends_at || client.trial_end).toLocaleDateString('pt-PT') 
+                        : 'Vitalício'}
+                    </p>
+                    <button 
+                      onClick={handleRenewTrial}
+                      className="text-[10px] bg-indigo-50 text-indigo-600 px-2 py-0.5 rounded border border-indigo-100 hover:bg-indigo-100 transition"
+                    >
+                      Renovar 3 dias
+                    </button>
+                  </div>
                 </div>
               </div>
             </div>

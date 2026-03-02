@@ -6,12 +6,16 @@ export const dynamic = 'force-dynamic';
 export default async function MessagesPage({
   searchParams,
 }: {
-  searchParams: { q?: string; page?: string };
+  searchParams: { q?: string; client_id?: string; page?: string };
 }) {
   const supabase = createClient();
   const query = searchParams.q || '';
+  const clientId = searchParams.client_id || '';
   const page = parseInt(searchParams.page || '1');
   const pageSize = 20;
+
+  // Fetch clients for the filter
+  const { data: clients } = await supabase.from('clients').select('id, company_name, name').order('company_name', { ascending: true });
 
   let dbQuery = supabase
     .from('messages')
@@ -21,21 +25,55 @@ export default async function MessagesPage({
     dbQuery = dbQuery.ilike('phone', `%${query}%`);
   }
 
+  if (clientId) {
+    // If we have a client filter, we should ideally filter by their phone.
+    // Since messages are linked by phone, we find the client's phone first.
+    const { data: selectedClient } = await supabase.from('clients').select('phone, phone_e164').eq('id', clientId).single();
+    if (selectedClient) {
+      const phone = selectedClient.phone_e164 || selectedClient.phone;
+      if (phone) {
+        dbQuery = dbQuery.eq('phone', phone);
+      }
+    }
+  }
+
   const { data: messages, count, error } = await dbQuery
     .order('created_at', { ascending: false })
     .range((page - 1) * pageSize, page * pageSize - 1);
 
   return (
     <div>
-      <div className="mb-8 flex items-center justify-between">
+      <div className="mb-8 flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
         <h1 className="text-3xl font-bold text-slate-900">Histórico de Mensagens</h1>
-        <div className="relative w-72">
-          <Search className="absolute left-3 top-1/2 h-5 w-5 -translate-y-1/2 text-slate-400" />
-          <input
-            type="text"
-            placeholder="Pesquisar por número..."
-            className="w-full rounded-lg border border-slate-300 pl-10 pr-4 py-2 focus:border-indigo-500 focus:ring-indigo-500"
-          />
+        <div className="flex flex-wrap gap-3">
+          <div className="relative w-64">
+            <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+            <input
+              type="text"
+              placeholder="Pesquisar por número..."
+              defaultValue={query}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') {
+                  const val = (e.target as HTMLInputElement).value;
+                  window.location.href = `/app/messages?q=${val}${clientId ? `&client_id=${clientId}` : ''}`;
+                }
+              }}
+              className="w-full rounded-lg border border-slate-300 pl-9 pr-4 py-2 text-sm focus:border-indigo-500 focus:ring-indigo-500"
+            />
+          </div>
+          
+          <select 
+            value={clientId}
+            onChange={(e) => {
+              window.location.href = `/app/messages?client_id=${e.target.value}${query ? `&q=${query}` : ''}`;
+            }}
+            className="rounded-lg border border-slate-300 px-3 py-2 text-sm focus:border-indigo-500 focus:ring-indigo-500"
+          >
+            <option value="">Todos os Clientes</option>
+            {clients?.map(c => (
+              <option key={c.id} value={c.id}>{c.company_name || c.name}</option>
+            ))}
+          </select>
         </div>
       </div>
 

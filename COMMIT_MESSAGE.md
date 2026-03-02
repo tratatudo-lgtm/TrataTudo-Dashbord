@@ -1,1 +1,1 @@
-fix(login): add debug panel and safer auth flows
+Align dashboard to client-bot workflow

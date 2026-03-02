@@ -78,7 +78,7 @@ export default function LoginPage() {
         setMessage('Registo efetuado! Verifique o seu email.');
       } else if (mode === 'recover') {
         const { data, error } = await supabase.auth.resetPasswordForEmail(email, {
-          redirectTo: `${window.location.origin}/auth/callback?next=/reset-password`,
+          redirectTo: `${window.location.origin}/auth/callback`,
         });
         if (error) throw error;
         addLog("recover", true, "Email de recuperação enviado", data);

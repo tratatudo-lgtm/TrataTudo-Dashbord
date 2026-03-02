@@ -26,6 +26,13 @@ export default async function ClientsPage({
 
   const { data: clients, error } = await dbQuery.order('created_at', { ascending: false });
 
+  const renderCell = (client: any, keys: string[]) => {
+    for (const key of keys) {
+      if (client[key] !== undefined) return client[key];
+    }
+    return <span className="text-rose-500 italic text-xs">coluna em falta</span>;
+  };
+
   return (
     <div>
       <div className="mb-8 flex items-center justify-between">
@@ -55,6 +62,7 @@ export default async function ClientsPage({
             <tr>
               <th className="px-6 py-4">Empresa</th>
               <th className="px-6 py-4">Telefone</th>
+              <th className="px-6 py-4">Instância</th>
               <th className="px-6 py-4">Status</th>
               <th className="px-6 py-4">Expira em</th>
               <th className="px-6 py-4 text-right">Ações</th>
@@ -63,19 +71,30 @@ export default async function ClientsPage({
           <tbody className="divide-y divide-slate-100 text-sm text-slate-700">
             {clients?.map((client) => (
               <tr key={client.id} className="hover:bg-slate-50 transition">
-                <td className="px-6 py-4 font-medium text-slate-900">{client.name}</td>
-                <td className="px-6 py-4 font-mono">{client.phone}</td>
+                <td className="px-6 py-4 font-medium text-slate-900">
+                  {renderCell(client, ['company_name', 'name'])}
+                </td>
+                <td className="px-6 py-4 font-mono">
+                  {renderCell(client, ['phone_e164', 'phone'])}
+                </td>
+                <td className="px-6 py-4 font-mono text-xs">
+                  {renderCell(client, ['instance_name'])}
+                </td>
                 <td className="px-6 py-4">
                   <span className={`rounded-full px-2 py-1 text-xs font-semibold ${
                     client.status === 'active' ? 'bg-emerald-100 text-emerald-700' :
                     client.status === 'trial' ? 'bg-indigo-100 text-indigo-700' :
                     'bg-rose-100 text-rose-700'
                   }`}>
-                    {client.status}
+                    {client.status || <span className="text-rose-500 italic text-[10px]">coluna em falta</span>}
                   </span>
                 </td>
                 <td className="px-6 py-4">
-                  {client.trial_end ? new Date(client.trial_end).toLocaleDateString('pt-PT') : '-'}
+                  {client.trial_ends_at || client.trial_end ? (
+                    new Date(client.trial_ends_at || client.trial_end).toLocaleDateString('pt-PT')
+                  ) : (
+                    <span className="text-slate-400">-</span>
+                  )}
                 </td>
                 <td className="px-6 py-4 text-right">
                   <div className="flex justify-end gap-2">
