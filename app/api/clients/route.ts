@@ -64,8 +64,7 @@ export async function POST(request: Request) {
           phone_e164,
           bot_instructions: bot_instructions || 'Olá! Como posso ajudar?',
           status: 'trial',
-          trial_end: trialEnd.toISOString(),
-          updated_at: new Date().toISOString()
+          trial_end: trialEnd.toISOString()
         }
       ])
       .select()
@@ -73,7 +72,7 @@ export async function POST(request: Request) {
 
     if (error) throw error;
 
-    return NextResponse.json({ ok: true, data });
+    return NextResponse.json({ ok: true });
   } catch (error: any) {
     console.error('API Clients POST Error:', error);
     return NextResponse.json({ ok: false, error: error.message }, { status: 500 });
