@@ -38,24 +38,21 @@ export function ClientQuickActions({ client }: { client: any }) {
       newTrialEnd.setDate(newTrialEnd.getDate() + 3);
       
       const updates: any = {
+        id: client.id,
         status: 'trial',
+        trial_end: newTrialEnd.toISOString(),
         updated_at: new Date().toISOString()
       };
       
-      if (client.trial_end !== undefined) {
-        updates.trial_end = newTrialEnd.toISOString();
-      } else if (client.trial_ends_at !== undefined) {
-        updates.trial_ends_at = newTrialEnd.toISOString();
-      } else {
-        updates.trial_end = newTrialEnd.toISOString();
-      }
+      const res = await fetch('/api/clients/update', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(updates),
+      });
 
-      const { error } = await supabase
-        .from('clients')
-        .update(updates)
-        .eq('id', client.id);
-
-      if (error) throw error;
+      const data = await res.json();
+      if (!res.ok || !data.ok) throw new Error(data.error || 'Erro ao renovar');
+      
       router.refresh();
     } catch (err: any) {
       alert('Erro ao renovar: ' + err.message);

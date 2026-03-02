@@ -33,25 +33,22 @@ export function CreateTrialModal({ isOpen, onClose }: { isOpen: boolean; onClose
       return;
     }
 
-    const payload: any = {
+    const payload = {
       company_name: companyName,
       phone_e164: normalizedPhone,
-      instance_name: instanceName || companyName.toLowerCase().replace(/\s+/g, '_'),
-      status: status,
-      trial_end: new Date(trialEnd).toISOString(),
       bot_instructions: 'Olá! Como posso ajudar?',
-      updated_at: new Date().toISOString()
     };
 
-    const res = await fetch('/api/admin/clients', {
+    const res = await fetch('/api/clients', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
     });
 
-    if (!res.ok) {
-      const errData = await res.json();
-      setError(`Erro ao criar cliente: ${errData.error || 'Erro desconhecido'}`);
+    const data = await res.json();
+
+    if (!res.ok || !data.ok) {
+      setError(`Erro ao criar cliente: ${data.error || 'Erro desconhecido'}`);
       setLoading(false);
     } else {
       onClose();

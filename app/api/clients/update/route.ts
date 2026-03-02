@@ -12,15 +12,31 @@ export async function POST(request: Request) {
   try {
     const { id, ...updates } = await request.json();
     
+    if (!id) {
+      return NextResponse.json({ ok: false, error: 'ID é obrigatório' }, { status: 400 });
+    }
+
+    // Map common aliases to correct column names
+    const mappedUpdates: any = { ...updates };
+    if (mappedUpdates.trial_ends_at) {
+      mappedUpdates.trial_end = mappedUpdates.trial_ends_at;
+      delete mappedUpdates.trial_ends_at;
+    }
+    if (mappedUpdates.system_prompt) {
+      mappedUpdates.bot_instructions = mappedUpdates.system_prompt;
+      delete mappedUpdates.system_prompt;
+    }
+
     const { error } = await supabase
       .from('clients')
-      .update(updates)
+      .update(mappedUpdates)
       .eq('id', id);
 
     if (error) throw error;
 
-    return NextResponse.json({ success: true });
+    return NextResponse.json({ ok: true });
   } catch (error: any) {
-    return NextResponse.json({ error: error.message }, { status: 500 });
+    console.error('API Clients Update Error:', error);
+    return NextResponse.json({ ok: false, error: error.message }, { status: 500 });
   }
 }

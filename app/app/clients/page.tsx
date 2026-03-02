@@ -17,7 +17,7 @@ export default async function ClientsPage({
 
   // Get base URL for server-side fetch
   const baseUrl = getBaseUrl();
-  const endpoint = `${baseUrl}/api/admin/clients?status=${status}&q=${query}`;
+  const endpoint = `${baseUrl}/api/clients?status=${status}&q=${query}`;
   
   let clients: any[] = [];
   let error: string | null = null;
@@ -37,7 +37,7 @@ export default async function ClientsPage({
       data = { error: 'Resposta inválida do servidor (JSON malformado)' };
     }
 
-    if (!res.ok) {
+    if (!res.ok || !data.ok) {
       const errorMsg = data.error || 'Erro ao carregar clientes';
       const isPermissionError = errorMsg.toLowerCase().includes('permission') || 
                                 errorMsg.toLowerCase().includes('rls') || 
@@ -53,7 +53,7 @@ export default async function ClientsPage({
       }
       console.error('Clients API Error:', { status: res.status, data });
     } else {
-      clients = data || [];
+      clients = data.data || [];
     }
   } catch (err: any) {
     console.error('Critical Error in ClientsPage SSR:', err);
