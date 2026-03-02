@@ -1,71 +1,55 @@
+'use client';
+
+import { useState, useEffect } from 'react';
 import Link from 'next/link';
-import { Edit2, ExternalLink, Copy, Zap, Search, Plus, Filter, AlertCircle } from 'lucide-react';
+import { Edit2, ExternalLink, Copy, Zap, Search, Plus, Filter, AlertCircle, Users, Loader2 } from 'lucide-react';
 import { ClientActionButtons } from '@/components/clients/client-action-buttons';
 import { ClientQuickActions } from '@/components/clients/client-quick-actions';
-import { DebugPanel } from '@/components/debug-panel';
-import { getBaseUrl } from '@/lib/baseUrl';
+import { useSearchParams, useRouter } from 'next/navigation';
 
-export const dynamic = 'force-dynamic';
+export default function ClientsPage() {
+  const searchParams = useSearchParams();
+  const router = useRouter();
+  const status = searchParams.get('status') || 'all';
+  const query = searchParams.get('q') || '';
 
-export default async function ClientsPage({
-  searchParams,
-}: {
-  searchParams: { status?: string; q?: string };
-}) {
-  const status = searchParams.status || 'all';
-  const query = searchParams.q || '';
+  const [clients, setClients] = useState<any[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
-  // Get base URL for server-side fetch
-  const baseUrl = getBaseUrl();
-  const endpoint = `${baseUrl}/api/clients?status=${status}&q=${query}`;
-  
-  let clients: any[] = [];
-  let error: string | null = null;
-  let hint: string | undefined = undefined;
-
-  try {
-    const res = await fetch(endpoint, {
-      cache: 'no-store'
-    });
-    
-    // Check if response is valid JSON
-    let data: any = [];
+  const fetchClients = async () => {
+    setLoading(true);
+    setError(null);
     try {
-      data = await res.json();
-    } catch (e) {
-      console.error('Failed to parse clients JSON:', e);
-      data = { error: 'Resposta inválida do servidor (JSON malformado)' };
-    }
+      const endpoint = `/api/clients?status=${status}&q=${query}`;
+      const res = await fetch(endpoint);
+      const json = await res.json();
 
-    if (!res.ok || !data.ok) {
-      const errorMsg = data.error || 'Erro ao carregar clientes';
-      const isPermissionError = errorMsg.toLowerCase().includes('permission') || 
-                                errorMsg.toLowerCase().includes('rls') || 
-                                errorMsg.toLowerCase().includes('policy') ||
-                                errorMsg.toLowerCase().includes('not found') ||
-                                errorMsg.toLowerCase().includes('relation');
-      
-      error = errorMsg;
-      if (isPermissionError) {
-        hint = 'Sem permissões ou tabela inexistente. Verifique as políticas de RLS e se a tabela "clients" foi criada.';
-      } else {
-        hint = 'Verifique a ligação à base de dados e as variáveis de ambiente.';
+      if (!json.ok) {
+        throw new Error(json.error || 'Erro ao carregar clientes');
       }
-      console.error('Clients API Error:', { status: res.status, data });
-    } else {
-      clients = data.data || [];
-    }
-  } catch (err: any) {
-    console.error('Critical Error in ClientsPage SSR:', err);
-    error = err.message || 'Ocorreu um erro inesperado no servidor.';
-    hint = 'Erro crítico durante a renderização. Verifique os logs do servidor.';
-  }
 
-  const renderCell = (client: any, keys: string[]) => {
-    for (const key of keys) {
-      if (client[key] !== undefined && client[key] !== null) return client[key];
+      setClients(json.data);
+    } catch (err: any) {
+      console.error('Error in ClientsPage:', err);
+      setError(err.message || 'Ocorreu um erro inesperado.');
+    } finally {
+      setLoading(false);
     }
-    return <span className="text-rose-500 italic text-[10px]">coluna em falta</span>;
+  };
+
+  useEffect(() => {
+    fetchClients();
+  }, [status, query]);
+
+  const handleSearch = (e: React.FormEvent<HTMLFormElement>) => {
+    e.preventDefault();
+    const formData = new FormData(e.currentTarget);
+    const q = formData.get('q') as string;
+    const params = new URLSearchParams(searchParams.toString());
+    if (q) params.set('q', q);
+    else params.delete('q');
+    router.push(`/app/clients?${params.toString()}`);
   };
 
   return (
@@ -84,7 +68,12 @@ export default async function ClientsPage({
           <div>
             <h3 className="text-rose-900 font-bold">Erro ao carregar dados</h3>
             <p className="text-rose-700 text-sm mt-1">{error}</p>
-            {hint && <p className="text-rose-600 text-xs mt-2 font-medium">💡 Sugestão: {hint}</p>}
+            <button 
+              onClick={() => fetchClients()}
+              className="mt-3 text-xs font-bold text-rose-600 hover:text-rose-800 underline"
+            >
+              Tentar novamente
+            </button>
           </div>
         </div>
       )}
@@ -92,7 +81,7 @@ export default async function ClientsPage({
       <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-sm flex flex-col md:flex-row gap-4 items-center">
         <div className="relative flex-1 w-full">
           <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
-          <form action="/app/clients" method="GET">
+          <form onSubmit={handleSearch}>
             <input
               type="text"
               name="q"
@@ -100,7 +89,6 @@ export default async function ClientsPage({
               placeholder="Pesquisar por empresa ou telefone..."
               className="w-full rounded-lg border border-slate-300 pl-10 pr-4 py-2 text-sm focus:border-indigo-500 focus:ring-indigo-500"
             />
-            {status !== 'all' && <input type="hidden" name="status" value={status} />}
           </form>
         </div>
         
@@ -136,51 +124,61 @@ export default async function ClientsPage({
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100 text-sm text-slate-700">
-              {clients?.map((client) => (
-                <tr key={client.id} className="hover:bg-slate-50/50 transition-colors group">
-                  <td className="px-6 py-4">
-                    <div className="font-semibold text-slate-900">
-                      {renderCell(client, ['company_name', 'name'])}
+              {loading ? (
+                <tr>
+                  <td colSpan={6} className="px-6 py-12 text-center">
+                    <div className="flex flex-col items-center justify-center">
+                      <Loader2 className="h-8 w-8 text-indigo-600 animate-spin mb-2" />
+                      <p className="text-slate-500 text-xs">A carregar clientes...</p>
                     </div>
-                    <div className="text-[10px] text-slate-400 font-mono mt-0.5">ID: {String(client.id).substring(0, 8)}...</div>
-                  </td>
-                  <td className="px-6 py-4 font-mono text-xs">
-                    {renderCell(client, ['phone_e164', 'phone'])}
-                  </td>
-                  <td className="px-6 py-4">
-                    <code className="px-2 py-0.5 bg-slate-100 rounded text-[10px] font-mono text-slate-600">
-                      {renderCell(client, ['instance_name'])}
-                    </code>
-                  </td>
-                  <td className="px-6 py-4">
-                    <span className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-[10px] font-bold uppercase tracking-wider ${
-                      client.status === 'active' ? 'bg-emerald-100 text-emerald-700' :
-                      client.status === 'trial' ? 'bg-indigo-100 text-indigo-700' :
-                      'bg-rose-100 text-rose-700'
-                    }`}>
-                      {client.status || <span className="text-rose-500 italic text-[10px]">coluna em falta</span>}
-                    </span>
-                  </td>
-                  <td className="px-6 py-4 whitespace-nowrap">
-                    {client.trial_end || client.trial_ends_at ? (
-                      <div className="flex flex-col">
-                        <span className="text-slate-900 font-medium">
-                          {new Date(client.trial_end || client.trial_ends_at).toLocaleDateString('pt-PT')}
-                        </span>
-                        <span className="text-[10px] text-slate-400">
-                          {new Date(client.trial_end || client.trial_ends_at) < new Date() ? 'Expirado' : 'Válido'}
-                        </span>
-                      </div>
-                    ) : (
-                      <span className="text-slate-400">-</span>
-                    )}
-                  </td>
-                  <td className="px-6 py-4 text-right">
-                    <ClientQuickActions client={client} />
                   </td>
                 </tr>
-              ))}
-              {(!clients || clients.length === 0) && (
+              ) : clients.length > 0 ? (
+                clients.map((client) => (
+                  <tr key={client.id} className="hover:bg-slate-50/50 transition-colors group">
+                    <td className="px-6 py-4">
+                      <div className="font-semibold text-slate-900">
+                        {client.company_name}
+                      </div>
+                      <div className="text-[10px] text-slate-400 font-mono mt-0.5">ID: {String(client.id).substring(0, 8)}...</div>
+                    </td>
+                    <td className="px-6 py-4 font-mono text-xs">
+                      {client.phone_e164}
+                    </td>
+                    <td className="px-6 py-4">
+                      <code className="px-2 py-0.5 bg-slate-100 rounded text-[10px] font-mono text-slate-600">
+                        {client.instance_name || '-'}
+                      </code>
+                    </td>
+                    <td className="px-6 py-4">
+                      <span className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-[10px] font-bold uppercase tracking-wider ${
+                        client.status === 'active' ? 'bg-emerald-100 text-emerald-700' :
+                        client.status === 'trial' ? 'bg-indigo-100 text-indigo-700' :
+                        'bg-rose-100 text-rose-700'
+                      }`}>
+                        {client.status || 'N/A'}
+                      </span>
+                    </td>
+                    <td className="px-6 py-4 whitespace-nowrap">
+                      {client.trial_end ? (
+                        <div className="flex flex-col">
+                          <span className="text-slate-900 font-medium">
+                            {new Date(client.trial_end).toLocaleDateString('pt-PT')}
+                          </span>
+                          <span className="text-[10px] text-slate-400">
+                            {new Date(client.trial_end) < new Date() ? 'Expirado' : 'Válido'}
+                          </span>
+                        </div>
+                      ) : (
+                        <span className="text-slate-400">-</span>
+                      )}
+                    </td>
+                    <td className="px-6 py-4 text-right">
+                      <ClientQuickActions client={client} />
+                    </td>
+                  </tr>
+                ))
+              ) : (
                 <tr>
                   <td colSpan={6} className="px-6 py-12 text-center">
                     <div className="flex flex-col items-center justify-center">
@@ -197,29 +195,6 @@ export default async function ClientsPage({
           </table>
         </div>
       </div>
-      <DebugPanel endpoint={endpoint} error={error} hint={hint} data={clients} />
     </div>
-  );
-}
-
-function Users(props: any) {
-  return (
-    <svg
-      {...props}
-      xmlns="http://www.w3.org/2000/svg"
-      width="24"
-      height="24"
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="2"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-    >
-      <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2" />
-      <circle cx="9" cy="7" r="4" />
-      <path d="M22 21v-2a4 4 0 0 0-3-3.87" />
-      <path d="M16 3.13a4 4 0 0 1 0 7.75" />
-    </svg>
   );
 }
