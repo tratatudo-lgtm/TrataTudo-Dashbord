@@ -1,19 +1,10 @@
 import { createClient } from '@/lib/supabase/server';
 import { NextResponse } from 'next/server';
 
-function deriveStatus(is_active: boolean | null, trial_expires_at: string | null) {
-  if (trial_expires_at) {
-    const now = new Date();
-    const trialEnd = new Date(trial_expires_at);
-    if (trialEnd > now) return 'trial';
-  }
-  return is_active ? 'active' : 'inactive';
-}
-
 export async function GET(request: Request) {
   try {
     const { searchParams } = new URL(request.url);
-    const statusFilter = searchParams.get('status');
+    const status = searchParams.get('status');
     const query = searchParams.get('q');
 
     const supabase = createClient();
@@ -25,34 +16,21 @@ export async function GET(request: Request) {
 
     let dbQuery = supabase
       .from('clients')
-      .select('id, name, phone, active_number, business_type, is_active, trial_expires_at, bot_instructions');
+      .select('id, company_name, phone_e164, bot_instructions, trial_end, status');
 
-    if (query) {
-      dbQuery = dbQuery.or(
-        `name.ilike.%${query}%,phone.ilike.%${query}%,active_number.ilike.%${query}%`
-      );
+    if (status && status !== 'all') {
+      dbQuery = dbQuery.eq('status', status);
     }
 
-    const { data, error } = await dbQuery.order('created_at', { ascending: false });
+    if (query) {
+      dbQuery = dbQuery.or(`company_name.ilike.%${query}%,phone_e164.ilike.%${query}%`);
+    }
+
+    const { data, error } = await dbQuery.order('id', { ascending: false });
 
     if (error) throw error;
 
-    const mapped = (data || []).map((client) => ({
-      id: client.id,
-      company_name: client.name,
-      phone_e164: client.phone || client.active_number || null,
-      business_type: client.business_type,
-      bot_instructions: client.bot_instructions || '',
-      trial_end: client.trial_expires_at,
-      status: deriveStatus(client.is_active, client.trial_expires_at)
-    }));
-
-    const filtered = statusFilter && statusFilter !== 'all'
-      ? mapped.filter(c => c.status === statusFilter)
-      : mapped;
-
-    return NextResponse.json({ ok: true, data: filtered });
-
+    return NextResponse.json({ ok: true, data: data || [] });
   } catch (error: any) {
     console.error('API Clients GET Error:', error);
     return NextResponse.json({ ok: false, error: error.message }, { status: 500 });
@@ -69,37 +47,45 @@ export async function POST(request: Request) {
     }
 
     const body = await request.json();
-    const { company_name, phone_e164, business_type, bot_instructions } = body;
+    const { company_name, phone_e164, bot_instructions } = body;
 
-    if (!company_name) {
-      return NextResponse.json({ ok: false, error: 'Nome da empresa é obrigatório' }, { status: 400 });
+    if (!company_name || !phone_e164) {
+      return NextResponse.json(
+        { ok: false, error: 'Nome da empresa e telefone são obrigatórios' },
+        { status: 400 }
+      );
     }
 
+    const trialStart = new Date();
     const trialEnd = new Date();
     trialEnd.setDate(trialEnd.getDate() + 3);
 
-    const { data, error } = await supabase
+    const { error } = await supabase
       .from('clients')
-      .insert([
-        {
-          name: company_name,
-          phone: phone_e164 || null,
-          active_number: phone_e164 || null,
-          business_type: business_type || 'Outro',
-          trial_expires_at: trialEnd.toISOString(),
-          is_active: true,
-          bot_instructions: bot_instructions || 'Olá! Como posso ajudar?'
-        }
-      ])
-      .select()
-      .single();
+      .insert([{
+        company_name,
+        phone_e164,
+        bot_instructions: bot_instructions || 'Olá! Como posso ajudar? 🙂',
+        status: 'trial',
+        trial_start: trialStart.toISOString(),
+        trial_end: trialEnd.toISOString()
+      }]);
 
-    if (error) throw error;
+    if (error) {
+      if (error.code === '23505' || error.message?.toLowerCase().includes('phone_e164')) {
+        return NextResponse.json({ ok: false, error: 'Este número já está registado.' }, { status: 400 });
+      }
+      throw error;
+    }
 
     return NextResponse.json({ ok: true });
-
   } catch (error: any) {
     console.error('API Clients POST Error:', error);
-    return NextResponse.json({ ok: false, error: error.message }, { status: 500 });
+    const message =
+      error.code === '23505' || error.message?.toLowerCase().includes('phone_e164')
+        ? 'Este número já está registado.'
+        : error.message;
+
+    return NextResponse.json({ ok: false, error: message }, { status: 500 });
   }
 }
