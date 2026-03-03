@@ -16,13 +16,37 @@ function getSupabaseAdmin() {
   return createSbAdmin(url, key, { auth: { persistSession: false } });
 }
 
-function normalizeDigits(phone: string) {
-  // Evolution docs: query param number = "Phone number (with country code)"
-  // Vamos enviar só dígitos (ex: 3519xxxxxxx).
-  return String(phone || "")
-    .trim()
-    .replace(/\s+/g, "")
-    .replace(/[^\d]/g, "");
+function digitsOnly(phone: string) {
+  return String(phone || "").trim().replace(/\s+/g, "").replace(/[^\d]/g, "");
+}
+
+function toPlusE164Digits(phone: string) {
+  // devolve string tipo "+3519...." (sem espaços)
+  let p = String(phone || "").trim().replace(/\s+/g, "");
+  if (!p.startsWith("+")) {
+    const d = digitsOnly(p);
+    if (d.startsWith("351")) p = "+" + d;
+    else p = "+" + d;
+  }
+  // remove coisas estranhas
+  p = p.replace(/[^\d+]/g, "");
+  return p;
+}
+
+async function evoConnect(evoUrl: string, evoKey: string, instanceName: string, query?: string) {
+  const url = query
+    ? `${evoUrl}/instance/connect/${encodeURIComponent(instanceName)}?${query}`
+    : `${evoUrl}/instance/connect/${encodeURIComponent(instanceName)}`;
+
+  const resp = await fetch(url, { method: "GET", headers: { apikey: evoKey } });
+  const json = await resp.json().catch(() => null);
+
+  if (!resp.ok) {
+    const fallback = await resp.text().catch(() => "");
+    return { ok: false, status: resp.status, error: json || fallback, url };
+  }
+
+  return { ok: true, data: json, url };
 }
 
 export async function POST(request: Request) {
@@ -43,7 +67,7 @@ export async function POST(request: Request) {
     const evoKey = process.env.EVOLUTION_API_KEY;
     if (!evoUrl || !evoKey) return bad("Evolution API não configurada", 500);
 
-    // 1) buscar instância active do cliente
+    // instância active
     const supabase = getSupabaseAdmin();
     const { data: ci, error: ciErr } = await supabase
       .from("client_instances")
@@ -59,55 +83,86 @@ export async function POST(request: Request) {
     const instanceName = ci?.instance_name;
     if (!instanceName) return bad("Cliente sem instância active", 404);
 
-    // 2) chamar Evolution connect
-    // docs: GET /instance/connect/{instance} (opcional ?number=...)
-    // QR: sem number
-    // Pairing: com number=351...
-    const results: any = { ok: true, client_id, instance_name: instanceName, mode };
-
-    const doConnect = async (withNumber?: string) => {
-      const url =
-        withNumber && withNumber.length > 0
-          ? `${evoUrl}/instance/connect/${encodeURIComponent(instanceName)}?number=${encodeURIComponent(withNumber)}`
-          : `${evoUrl}/instance/connect/${encodeURIComponent(instanceName)}`;
-
-      const resp = await fetch(url, {
-        method: "GET",
-        headers: { apikey: evoKey }
-      });
-
-      const json = await resp.json().catch(() => null);
-
-      if (!resp.ok) {
-        return { ok: false, status: resp.status, error: json || (await resp.text().catch(() => "")) };
-      }
-
-      return { ok: true, data: json };
-    };
-
+    // QR simples
     if (mode === "qr") {
-      results.qr = await doConnect();
-      return NextResponse.json(results);
+      const qr = await evoConnect(evoUrl, evoKey, instanceName);
+      return NextResponse.json({ ok: true, client_id, instance_name: instanceName, qr });
     }
 
+    // Pairing com tentativas de query param (number vs phoneNumber, com/sem +)
     if (mode === "pairing") {
-      if (!phoneForPairing) return bad("Para pairing, envia phone/number (ex: +3519... ou 3519...)");
-      const digits = normalizeDigits(phoneForPairing);
-      if (!digits) return bad("Número inválido para pairing");
-      results.pairing = await doConnect(digits);
-      return NextResponse.json(results);
+      if (!phoneForPairing) return bad('Para pairing, envia "number" (ex: 3519... ou +3519...)');
+
+      const d = digitsOnly(phoneForPairing);
+      const plus = toPlusE164Digits(phoneForPairing);
+
+      const attempts = [
+        `number=${encodeURIComponent(d)}`,
+        `number=${encodeURIComponent(plus)}`,
+        `phoneNumber=${encodeURIComponent(d)}`,
+        `phoneNumber=${encodeURIComponent(plus)}`
+      ];
+
+      let last: any = null;
+
+      for (const q of attempts) {
+        const res = await evoConnect(evoUrl, evoKey, instanceName, q);
+        last = res;
+
+        const pairingCode = res.ok ? res.data?.pairingCode : null;
+        if (pairingCode) {
+          return NextResponse.json({
+            ok: true,
+            client_id,
+            instance_name: instanceName,
+            pairingCode,
+            usedQuery: q
+          });
+        }
+      }
+
+      // fallback: devolve QR para não bloquear o processo
+      // (porque a tua Evolution está a deixar this.phoneNumber vazio)
+      const qr = await evoConnect(evoUrl, evoKey, instanceName);
+      return NextResponse.json({
+        ok: false,
+        error: "A Evolution não gerou pairingCode (pairingCode=null). Vou devolver QR como alternativa.",
+        client_id,
+        instance_name: instanceName,
+        tried: attempts,
+        last,
+        qr
+      }, { status: 200 });
     }
 
     // both
     if (mode === "both") {
-      results.qr = await doConnect();
+      const qr = await evoConnect(evoUrl, evoKey, instanceName);
+
+      let pairing: any = { ok: false, error: 'Falta "number" para pairing' };
       if (phoneForPairing) {
-        const digits = normalizeDigits(phoneForPairing);
-        results.pairing = digits ? await doConnect(digits) : { ok: false, error: "Número inválido para pairing" };
-      } else {
-        results.pairing = { ok: false, error: "Falta phone/number para pairing" };
+        const d = digitsOnly(phoneForPairing);
+        const plus = toPlusE164Digits(phoneForPairing);
+
+        const attempts = [
+          `number=${encodeURIComponent(d)}`,
+          `number=${encodeURIComponent(plus)}`,
+          `phoneNumber=${encodeURIComponent(d)}`,
+          `phoneNumber=${encodeURIComponent(plus)}`
+        ];
+
+        for (const q of attempts) {
+          const res = await evoConnect(evoUrl, evoKey, instanceName, q);
+          const pairingCode = res.ok ? res.data?.pairingCode : null;
+          if (pairingCode) {
+            pairing = { ok: true, pairingCode, usedQuery: q };
+            break;
+          }
+          pairing = { ok: false, tried: attempts, last: res };
+        }
       }
-      return NextResponse.json(results);
+
+      return NextResponse.json({ ok: true, client_id, instance_name: instanceName, qr, pairing });
     }
 
     return bad('mode inválido. Usa "qr", "pairing" ou "both".');
