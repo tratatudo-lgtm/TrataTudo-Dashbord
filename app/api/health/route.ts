@@ -6,4 +6,8 @@ export async function GET() {
     service: 'tratatudo-dashboard',
     ts: new Date().toISOString(),
   });
+<<<<<<< HEAD
 }
+=======
+}
+>>>>>>> cce74b2 (Add /api/health endpoint)
