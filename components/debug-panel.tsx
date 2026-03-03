@@ -1,52 +1,85 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 
-type DebugPanelProps = {
-  endpoint?: string; // 🔥 agora opcional
+export type DebugPanelProps = {
+  endpoint?: string;
+  error?: string | null;
+  hint?: string | null;
+  data?: any;
+  title?: string;
 };
 
-export function DebugPanel({ endpoint = '/api/admin/stats' }: DebugPanelProps) {
-  const [data, setData] = useState<any>(null);
-  const [error, setError] = useState<string | null>(null);
+export function DebugPanel({
+  endpoint,
+  error,
+  hint,
+  data,
+  title = 'Debug',
+}: DebugPanelProps) {
+  const [fetched, setFetched] = useState<any>(null);
+  const [fetchError, setFetchError] = useState<string | null>(null);
+
+  const shouldFetch = useMemo(() => !!endpoint && typeof data === 'undefined', [endpoint, data]);
 
   useEffect(() => {
+    if (!shouldFetch) return;
+
+    let cancelled = false;
+
     async function load() {
       try {
-        const res = await fetch(endpoint, { cache: 'no-store' });
+        setFetchError(null);
+        const res = await fetch(endpoint as string, { cache: 'no-store' });
         const text = await res.text();
 
+        let json: any;
         try {
-          const json = JSON.parse(text);
-          setData(json);
+          json = JSON.parse(text);
         } catch {
-          setError('Resposta não é JSON válido');
+          throw new Error('Resposta não é JSON válido');
         }
-      } catch (err: any) {
-        setError(err.message);
+
+        if (!cancelled) setFetched({ status: res.status, ok: res.ok, json });
+      } catch (e: any) {
+        if (!cancelled) setFetchError(e?.message || 'Erro ao fazer fetch');
       }
     }
 
     load();
-  }, [endpoint]);
+    return () => {
+      cancelled = true;
+    };
+  }, [shouldFetch, endpoint]);
+
+  const showData = typeof data !== 'undefined' ? data : fetched;
 
   return (
     <div className="rounded-xl border bg-muted/20 p-4 text-xs">
-      <div className="font-semibold mb-2">Debug API ({endpoint})</div>
-
-      {error && (
-        <div className="text-red-500 mb-2">
-          Erro: {error}
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <div className="font-semibold">{title}</div>
+          {endpoint ? <div className="text-muted-foreground">Endpoint: {endpoint}</div> : null}
         </div>
-      )}
+      </div>
 
-      {data && (
-        <pre className="overflow-auto">
-          {JSON.stringify(data, null, 2)}
-        </pre>
-      )}
+      {(error || fetchError) ? (
+        <div className="mt-3 rounded-lg border border-red-200 bg-red-50 p-3 text-red-700">
+          <div className="font-medium">Erro</div>
+          <div className="mt-1">{error || fetchError}</div>
+          {hint ? <div className="mt-2 text-red-600">Sugestão: {hint}</div> : null}
+        </div>
+      ) : null}
 
-      {!data && !error && <div>A carregar...</div>}
+      <div className="mt-3">
+        {typeof showData === 'undefined' ? (
+          <div className="text-muted-foreground">Sem dados para mostrar.</div>
+        ) : (
+          <pre className="max-h-72 overflow-auto rounded-lg border bg-background p-3">
+            {JSON.stringify(showData, null, 2)}
+          </pre>
+        )}
+      </div>
     </div>
   );
 }
