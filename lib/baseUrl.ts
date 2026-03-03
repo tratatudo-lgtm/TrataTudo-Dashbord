@@ -1,23 +1,25 @@
+import { headers } from "next/headers";
+
 /**
- * Get the base URL for the application.
- * This should only be used on the server side.
+ * Devolve sempre uma URL ABSOLUTA (com https://...) para ser usada em SSR.
+ * Nunca retorna vazio.
  */
 export function getBaseUrl() {
-  // 1. Priority: NEXT_PUBLIC_SITE_URL (if it exists and starts with http)
-  if (process.env.NEXT_PUBLIC_SITE_URL && process.env.NEXT_PUBLIC_SITE_URL.startsWith('http')) {
-    return process.env.NEXT_PUBLIC_SITE_URL;
-  }
+  // 1) Melhor opção (define na Vercel):
+  // NEXT_PUBLIC_SITE_URL = https://trata-tudo-dashbord.vercel.app
+  const site = process.env.NEXT_PUBLIC_SITE_URL;
+  if (site && site.startsWith("http")) return site.replace(/\/$/, "");
 
-  // 2. Priority: APP_URL (if it exists and starts with http)
-  if (process.env.APP_URL && process.env.APP_URL.startsWith('http')) {
-    return process.env.APP_URL;
-  }
+  // 2) Vercel fornece VERCEL_URL sem protocolo (ex: trata-tudo-dashbord.vercel.app)
+  const vercel = process.env.VERCEL_URL;
+  if (vercel && vercel.length > 3) return `https://${vercel}`;
 
-  // 3. Priority: VERCEL_URL
-  if (process.env.VERCEL_URL) {
-    return `https://${process.env.VERCEL_URL}`;
-  }
+  // 3) Fallback por headers (runtime request)
+  const h = headers();
+  const proto = h.get("x-forwarded-proto") || "https";
+  const host = h.get("x-forwarded-host") || h.get("host");
+  if (host) return `${proto}://${host}`;
 
-  // 4. Fallback: localhost (only for development)
-  return 'http://localhost:3000';
+  // 4) Último fallback fixo
+  return "https://trata-tudo-dashbord.vercel.app";
 }
