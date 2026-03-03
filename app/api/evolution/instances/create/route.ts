@@ -7,50 +7,49 @@ function bad(msg: string, status = 400) {
   return NextResponse.json({ ok: false, error: msg }, { status });
 }
 
+function unauthorized() {
+  return NextResponse.json({ ok: false, error: "Não autorizado" }, { status: 401 });
+}
+
 function getSupabaseAdmin() {
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
   const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
-  if (!url || !key) {
-    throw new Error("Missing SUPABASE env vars.");
-  }
+  if (!url || !key) throw new Error("Missing SUPABASE env vars.");
 
-  return createSbAdmin(url, key, {
-    auth: { persistSession: false }
-  });
+  return createSbAdmin(url, key, { auth: { persistSession: false } });
 }
 
 export async function POST(request: Request) {
   try {
+    // ✅ Proteção por API KEY (igual ao /api/reports)
+    const apiKey = request.headers.get("x-tratatudo-key") || "";
+    const expected = process.env.ADMIN_API_KEY || "";
+    if (!expected || apiKey !== expected) return unauthorized();
+
     const body = await request.json();
     const client_id = Number(body.client_id);
 
-    if (!client_id) {
-      return bad("client_id é obrigatório");
-    }
+    if (!client_id) return bad("client_id é obrigatório");
 
     const instance_name = `${PREFIX}${client_id}`;
 
     const evoUrl = process.env.EVOLUTION_API_URL;
     const evoKey = process.env.EVOLUTION_API_KEY;
 
-    if (!evoUrl || !evoKey) {
-      return bad("Evolution API não configurada", 500);
-    }
+    if (!evoUrl || !evoKey) return bad("Evolution API não configurada", 500);
 
-    // 1️⃣ Criar instância na Evolution
+    // 1) Criar instância na Evolution
     const createResp = await fetch(`${evoUrl}/instance/create`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
         apikey: evoKey
       },
-      body: JSON.stringify({
-        instanceName: instance_name
-      })
+      body: JSON.stringify({ instanceName: instance_name })
     });
 
-    // 2️⃣ Confirmar se existe (caso já exista não falha)
+    // 2) Confirmar que existe
     const listResp = await fetch(`${evoUrl}/instance/fetchInstances`, {
       headers: { apikey: evoKey }
     });
@@ -64,22 +63,20 @@ export async function POST(request: Request) {
     if (!exists) {
       const txt = await createResp.text().catch(() => "");
       return bad(
-        `Não consegui criar/encontrar instância. ${createResp.status} ${txt}`,
+        `Não consegui criar/encontrar instância "${instance_name}". create=${createResp.status} ${txt?.slice(0, 200)}`,
         500
       );
     }
 
-    // 3️⃣ Switch no Supabase
+    // 3) Switch no Supabase
     const supabase = getSupabaseAdmin();
 
-    // desativa todas do cliente
     await supabase
       .from("client_instances")
       .update({ status: "inactive" })
       .eq("client_id", client_id);
 
-    // verifica se já existe no Supabase
-    const { data: existing } = await supabase
+    const { data: existing, error: exErr } = await supabase
       .from("client_instances")
       .select("id")
       .eq("client_id", client_id)
@@ -87,34 +84,26 @@ export async function POST(request: Request) {
       .limit(1)
       .maybeSingle();
 
+    if (exErr) throw exErr;
+
     if (existing?.id) {
-      await supabase
+      const { error: onErr } = await supabase
         .from("client_instances")
         .update({ status: "active" })
         .eq("id", existing.id);
+
+      if (onErr) throw onErr;
     } else {
-      await supabase
+      const { error: insErr } = await supabase
         .from("client_instances")
-        .insert([
-          {
-            client_id,
-            instance_name,
-            is_hub: false,
-            status: "active"
-          }
-        ]);
+        .insert([{ client_id, instance_name, is_hub: false, status: "active" }]);
+
+      if (insErr) throw insErr;
     }
 
-    return NextResponse.json({
-      ok: true,
-      client_id,
-      instance_name
-    });
+    return NextResponse.json({ ok: true, client_id, instance_name });
   } catch (error: any) {
     console.error("Create instance error:", error);
-    return NextResponse.json(
-      { ok: false, error: error.message },
-      { status: 500 }
-    );
+    return NextResponse.json({ ok: false, error: error.message }, { status: 500 });
   }
 }
