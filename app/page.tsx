@@ -11,21 +11,27 @@ import { DebugPanel } from '@/components/debug-panel';
 
 export const dynamic = 'force-dynamic';
 
-function getServerBaseUrl() {
-  const h = headers();
+function resolveBaseUrl() {
+  // 1) Se definires esta env na Vercel, é a melhor (ex: https://trata-tudo-dashbord.vercel.app)
+  const site = process.env.NEXT_PUBLIC_SITE_URL;
+  if (site && site.startsWith('http')) return site.replace(/\/$/, '');
 
-  // Em produção na Vercel isto vem sempre preenchido
+  // 2) Vercel fornece VERCEL_URL sem protocolo (ex: trata-tudo-dashbord.vercel.app)
+  const vercel = process.env.VERCEL_URL;
+  if (vercel) return `https://${vercel}`;
+
+  // 3) Fallback por headers (runtime request)
+  const h = headers();
   const proto = h.get('x-forwarded-proto') || 'https';
   const host = h.get('x-forwarded-host') || h.get('host');
+  if (host) return `${proto}://${host}`;
 
-  // fallback seguro
-  if (!host) return 'https://trata-tudo-dashbord.vercel.app';
-
-  return `${proto}://${host}`;
+  // 4) Último fallback fixo
+  return 'https://trata-tudo-dashbord.vercel.app';
 }
 
 export default async function DashboardPage() {
-  const baseUrl = getServerBaseUrl();
+  const baseUrl = resolveBaseUrl();
   const endpoint = `${baseUrl}/api/admin/stats`;
 
   let stats: any = {
@@ -133,9 +139,7 @@ export default async function DashboardPage() {
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
-        {/* Main Content: Alerts & Recent */}
         <div className="lg:col-span-2 space-y-8">
-          {/* Alertas */}
           <section className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
             <div className="p-6 border-b border-slate-100 flex items-center justify-between">
               <h2 className="text-lg font-bold text-slate-900 flex items-center gap-2">
@@ -179,7 +183,6 @@ export default async function DashboardPage() {
             </div>
           </section>
 
-          {/* Ações Rápidas */}
           <section className="grid grid-cols-1 sm:grid-cols-3 gap-4">
             <Link
               href="/app/clients"
@@ -210,7 +213,6 @@ export default async function DashboardPage() {
           </section>
         </div>
 
-        {/* Sidebar: Activity/Insights */}
         <div className="space-y-8">
           <section className="bg-slate-900 rounded-2xl p-8 text-white shadow-xl relative overflow-hidden">
             <div className="absolute top-0 right-0 p-4 opacity-10">
@@ -259,7 +261,14 @@ export default async function DashboardPage() {
         </div>
       </div>
 
-      <DebugPanel endpoint={endpoint} error={error} hint={hint} data={stats} title="Debug Dashboard" />
+      {/* Debug */}
+      <DebugPanel
+        title="Debug Dashboard"
+        endpoint={endpoint}
+        error={error}
+        hint={hint}
+        data={{ baseUrl, endpoint, stats }}
+      />
     </div>
   );
 }
