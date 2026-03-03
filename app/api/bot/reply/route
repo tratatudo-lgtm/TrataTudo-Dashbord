@@ -1,6 +1,12 @@
 import { NextResponse } from "next/server";
 import { createClient as createSbAdmin } from "@supabase/supabase-js";
 
+function unauthorized() {
+  return NextResponse.json({ ok: false, error: "Não autorizado" }, { status: 401 });
+}
+function bad(msg: string, status = 400) {
+  return NextResponse.json({ ok: false, error: msg }, { status });
+}
 function getSupabaseAdmin() {
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL!;
   const key = process.env.SUPABASE_SERVICE_ROLE_KEY!;
@@ -8,125 +14,333 @@ function getSupabaseAdmin() {
   return createSbAdmin(url, key, { auth: { persistSession: false } });
 }
 
-function unauthorized() {
-  return NextResponse.json({ ok: false, error: "Não autorizado" }, { status: 401 });
+const BOT_NAME = "Valenciano";
+
+function normalizeText(s: any) {
+  return String(s || "").replace(/\s+/g, " ").trim();
+}
+function toUpper(s: string) {
+  return s.toUpperCase().trim();
+}
+function isYes(s: string) {
+  const t = s.toLowerCase().trim();
+  return ["sim", "s", "ok", "certo", "confirmo", "confirmar", "isso"].includes(t);
+}
+function isNo(s: string) {
+  const t = s.toLowerCase().trim();
+  return ["não", "nao", "n", "nop"].includes(t);
+}
+function makeTracking() {
+  return `TT-${Math.random().toString(36).slice(2, 8).toUpperCase()}`;
+}
+function minutesAgo(d: string) {
+  return (Date.now() - new Date(d).getTime()) / 60000;
 }
 
-function bad(msg: string, status = 400) {
-  return NextResponse.json({ ok: false, error: msg }, { status });
-}
-
-function normalizeE164(phone: string) {
-  // assume que já vem E.164 do webhook; mantém simples
-  return String(phone || "").trim();
-}
-
-function minutesAgo(d: string | Date) {
-  const t = typeof d === "string" ? new Date(d).getTime() : d.getTime();
-  return (Date.now() - t) / 60000;
-}
-
-// Detetor simples para arrancar fluxos quando não há estado
-function detectIntent(text: string) {
-  const t = text.toLowerCase();
-  if (t.includes("atestado")) return "request_certificate";
-  if (t.includes("reclama") || t.includes("buraco") || t.includes("lixo") || t.includes("ilumina"))
-    return "complaint";
-  if (t.startsWith("estado") || t.includes("tt-")) return "check_status";
-  return "generic";
-}
-
-function short(s: string) {
-  return s.replace(/\s+/g, " ").trim();
-}
-
-type State = {
-  id: number;
-  client_id: number;
-  phone_e164: string;
-  intent: string;
-  step: string;
-  data: any;
-  updated_at: string;
+type Flow = {
+  flow_key: string;
+  title: string;
+  enabled: boolean;
+  schema: {
+    kind: string;
+    category_default?: string;
+    match?: { keywords?: string[] };
+    steps: Array<{
+      key: string;
+      ask: string;
+      type: "text" | "text_optional" | "enum";
+      options?: string[];
+      when?: { field: string; eq: string };
+    }>;
+  };
 };
 
-async function loadState(supabase: any, client_id: number, phone_e164: string): Promise<State | null> {
+async function loadFlows(supabase: any, client_id: number): Promise<Flow[]> {
+  const { data, error } = await supabase
+    .from("flow_defs")
+    .select("flow_key, title, enabled, schema")
+    .eq("client_id", client_id)
+    .eq("enabled", true);
+  if (error) throw error;
+  return (data || []) as Flow[];
+}
+
+async function loadState(supabase: any, client_id: number, phone_e164: string) {
   const { data, error } = await supabase
     .from("conversation_state")
-    .select("id, client_id, phone_e164, intent, step, data, updated_at")
+    .select("id, intent, step, data, updated_at")
     .eq("client_id", client_id)
     .eq("phone_e164", phone_e164)
     .maybeSingle();
-
   if (error) throw error;
   return data || null;
 }
 
-async function upsertState(
-  supabase: any,
-  client_id: number,
-  phone_e164: string,
-  patch: Partial<{ intent: string; step: string; data: any; last_user_message: string; last_bot_message: string }>
-) {
-  const { data, error } = await supabase
+async function upsertState(supabase: any, client_id: number, phone_e164: string, intent: string, step: string, data: any, lastUser?: string, lastBot?: string) {
+  const { error } = await supabase
     .from("conversation_state")
     .upsert(
       [
         {
           client_id,
           phone_e164,
-          intent: patch.intent || "generic",
-          step: patch.step || "start",
-          data: patch.data || {},
-          last_user_message: patch.last_user_message || null,
-          last_bot_message: patch.last_bot_message || null,
+          intent,
+          step,
+          data,
+          last_user_message: lastUser || null,
+          last_bot_message: lastBot || null,
         },
       ],
       { onConflict: "client_id,phone_e164" }
-    )
-    .select("id, intent, step, data, updated_at")
-    .single();
-
+    );
   if (error) throw error;
-  return data;
 }
 
 async function clearState(supabase: any, client_id: number, phone_e164: string) {
   await supabase.from("conversation_state").delete().eq("client_id", client_id).eq("phone_e164", phone_e164);
 }
 
-// ---- Fluxo: ATESTADO (máquina de estados) ----
-// passos: awaiting_type -> awaiting_name -> awaiting_address -> awaiting_purpose -> confirm
-function isYes(txt: string) {
-  const t = txt.toLowerCase().trim();
-  return ["sim", "s", "ok", "confirmo", "confirmar", "certo", "isso"].includes(t);
+function pickFlow(flows: Flow[], text: string): Flow | null {
+  const t = text.toLowerCase();
+  // escolhe o flow com mais “matches” por keywords
+  let best: { flow: Flow; score: number } | null = null;
+
+  for (const f of flows) {
+    const kws = f.schema?.match?.keywords || [];
+    let score = 0;
+    for (const k of kws) {
+      if (k && t.includes(k.toLowerCase())) score++;
+    }
+    if (!best || score > best.score) best = { flow: f, score };
+  }
+
+  if (best && best.score > 0) return best.flow;
+
+  // fallback: se nenhum match, usa request como padrão (se existir)
+  const req = flows.find((x) => x.flow_key === "request");
+  return req || (flows[0] || null);
 }
 
-function isNo(txt: string) {
-  const t = txt.toLowerCase().trim();
-  return ["não", "nao", "n", "nop", "errado"].includes(t);
+function checkWhen(step: any, answers: any) {
+  if (!step.when) return true;
+  const v = String(answers?.[step.when.field] || "").toLowerCase().trim();
+  return v === String(step.when.eq || "").toLowerCase().trim();
 }
 
-function guessCertType(txt: string) {
-  const t = txt.toLowerCase();
-  if (t.includes("resid")) return "Residência";
-  if (t.includes("morad")) return "Residência";
-  if (t.includes("trabal")) return "Trabalho";
-  if (t.includes("agreg")) return "Agregado";
-  return null;
+function nextStepIndex(flow: Flow, currentIdx: number, answers: any) {
+  for (let i = currentIdx; i < flow.schema.steps.length; i++) {
+    if (checkWhen(flow.schema.steps[i], answers)) return i;
+  }
+  return -1;
 }
 
-function friendlyBotName() {
-  return "Valenciano";
-}
-
-function entityName() {
-  return "União das Freguesias de Valença, Cristelo Covo e Arão";
+function humanizeStatus(status: string) {
+  switch (status) {
+    case "new": return "novo";
+    case "triage": return "em análise";
+    case "in_progress": return "em resolução";
+    case "waiting_customer": return "a aguardar a tua resposta";
+    case "done": return "concluído";
+    case "cancelled": return "cancelado";
+    default: return status;
+  }
 }
 
 export async function POST(req: Request) {
   try {
-    // 🔐 proteger com a mesma chave que já usas
+    // 🔐 proteção
     const apiKey = req.headers.get("x-tratatudo-key") || "";
     const expected = process.env.ADMIN_API_KEY || "";
-    if (!expected || api
+    if (!expected || apiKey !== expected) return unauthorized();
+
+    const supabase = getSupabaseAdmin();
+
+    const body = await req.json().catch(() => ({}));
+    const client_id = Number(body.client_id);
+    const phone_e164 = normalizeText(body.phone_e164);
+    const text = normalizeText(body.text);
+
+    if (!client_id) return bad("client_id é obrigatório");
+    if (!phone_e164) return bad("phone_e164 é obrigatório");
+    if (!text) return bad("text é obrigatório");
+
+    // permitir cancelar fluxo
+    if (["cancelar", "anular", "parar"].includes(text.toLowerCase().trim())) {
+      await clearState(supabase, client_id, phone_e164);
+      return NextResponse.json({ ok: true, reply: `Ok 👍 Cancelado. Em que posso ajudar agora? 🙂` });
+    }
+
+    // carregar flows
+    const flows = await loadFlows(supabase, client_id);
+
+    // estado atual
+    let state = await loadState(supabase, client_id, phone_e164);
+
+    // expirar estado velho (30 min)
+    if (state && minutesAgo(state.updated_at) > 30) {
+      await clearState(supabase, client_id, phone_e164);
+      state = null;
+    }
+
+    // --- comando “estado TT-XXXXXX” universal (não depende de flow) ---
+    const codeMatch = toUpper(text).match(/TT-[A-Z0-9]{4,12}/);
+    if (text.toLowerCase().startsWith("estado") || codeMatch) {
+      const code = codeMatch ? codeMatch[0] : toUpper(text).replace("ESTADO", "").trim();
+      if (!code) return NextResponse.json({ ok: true, reply: `Diz-me o código (ex: TT-ABC123) 🙂` });
+
+      const { data: ticket, error } = await supabase
+        .from("tickets")
+        .select("tracking_code, status, updated_at")
+        .eq("client_id", client_id)
+        .eq("tracking_code", code)
+        .maybeSingle();
+
+      if (error) throw error;
+
+      if (!ticket) {
+        return NextResponse.json({ ok: true, reply: `Não encontrei esse código 😕 Confirma se está certo (ex: TT-ABC123).` });
+      }
+
+      return NextResponse.json({ ok: true, reply: `O pedido *${ticket.tracking_code}* está *${humanizeStatus(ticket.status)}* 🙂` });
+    }
+
+    // --- se não existe estado, escolher flow e iniciar ---
+    if (!state) {
+      const flow = pickFlow(flows, text);
+      if (!flow) {
+        return NextResponse.json({
+          ok: true,
+          reply: `Olá 🙂 Sou o ${BOT_NAME}. Diz-me só o que precisas (pedido, reclamação, encomenda, reserva)…`,
+        });
+      }
+
+      const answers = {}; // começa vazio
+      const idx = nextStepIndex(flow, 0, answers);
+      const step = flow.schema.steps[idx];
+
+      const data = { flow_key: flow.flow_key, step_index: idx, answers };
+      const botMsg = step?.ask || `Ok 🙂 Diz-me só mais detalhes, por favor.`;
+
+      await upsertState(supabase, client_id, phone_e164, flow.flow_key, `step_${idx}`, data, text, botMsg);
+      return NextResponse.json({ ok: true, reply: botMsg });
+    }
+
+    // --- continuar flow existente ---
+    const flowKey = String(state.intent);
+    const flow = flows.find((f) => f.flow_key === flowKey);
+
+    // se o flow foi desativado, reset suave
+    if (!flow) {
+      await clearState(supabase, client_id, phone_e164);
+      return NextResponse.json({ ok: true, reply: `Ok 🙂 Vamos recomeçar. O que precisas? (pedido, reclamação, encomenda, reserva)` });
+    }
+
+    const stData = state.data || {};
+    const answers = stData.answers || {};
+    let idx = Number(stData.step_index ?? 0);
+
+    // guardar resposta no passo atual (se existir)
+    const currentStep = flow.schema.steps[idx];
+    if (currentStep) {
+      // valida enum
+      if (currentStep.type === "enum") {
+        const opt = (currentStep.options || []).map((o) => o.toLowerCase());
+        const v = text.toLowerCase().trim();
+        if (!opt.includes(v)) {
+          return NextResponse.json({ ok: true, reply: `Só para eu acertar 🙂 escolhe uma destas: ${currentStep.options?.join(", ")}.` });
+        }
+        answers[currentStep.key] = v;
+      } else if (currentStep.type === "text_optional") {
+        answers[currentStep.key] = isNo(text) ? null : text;
+      } else {
+        answers[currentStep.key] = text;
+      }
+    }
+
+    // avançar para o próximo passo que cumpre “when”
+    let nextIdx = nextStepIndex(flow, idx + 1, answers);
+
+    // se acabou, criar ticket e devolver tracking_code
+    if (nextIdx === -1) {
+      const kind = flow.schema.kind || "request";
+      const category = String(answers.category || flow.schema.category_default || "Geral");
+      const urgency = String(answers.urgency || "não").toLowerCase();
+      const priority = urgency === "sim" ? "high" : "medium";
+
+      const subject =
+        kind === "complaint"
+          ? `Reclamação: ${category}`
+          : kind === "order"
+          ? `Encomenda/Reserva`
+          : `Pedido`;
+
+      const description =
+        answers.description ||
+        answers.details ||
+        answers.request_type ||
+        `Pedido registado via bot (${flow.flow_key}).`;
+
+      const location_text = answers.location_text || null;
+      const customer_name = answers.customer_name || null;
+      const customer_contact = answers.customer_contact || phone_e164;
+
+      // cria ticket
+      const tracking_code = makeTracking();
+      const raw = {
+        __REPORT__: true,
+        flow_key: flow.flow_key,
+        kind,
+        category,
+        priority,
+        channel: "whatsapp",
+        language: "pt-PT",
+        ...answers,
+      };
+
+      const { data: created, error: insErr } = await supabase
+        .from("tickets")
+        .insert([
+          {
+            client_id,
+            tracking_code,
+            kind,
+            category,
+            subject,
+            description,
+            priority,
+            status: "new",
+            customer_name,
+            customer_contact,
+            location_text,
+            channel: "whatsapp",
+            metadata: { flow_key: flow.flow_key },
+            raw,
+          },
+        ])
+        .select("tracking_code, status")
+        .single();
+
+      if (insErr) throw insErr;
+
+      await clearState(supabase, client_id, phone_e164);
+
+      const reply =
+        `✅ Registado! O teu código é *${created.tracking_code}*.\n` +
+        `Para acompanhar, escreve: *estado ${created.tracking_code}* 🙂`;
+
+      return NextResponse.json({ ok: true, reply, tracking_code: created.tracking_code });
+    }
+
+    // perguntar próximo passo
+    const nextStep = flow.schema.steps[nextIdx];
+    const botMsg = nextStep?.ask || `Ok 🙂 Diz-me só mais um detalhe.`;
+
+    const newData = { flow_key: flow.flow_key, step_index: nextIdx, answers };
+    await upsertState(supabase, client_id, phone_e164, flow.flow_key, `step_${nextIdx}`, newData, text, botMsg);
+
+    return NextResponse.json({ ok: true, reply: botMsg });
+  } catch (e: any) {
+    console.error("BOT REPLY ERROR:", e);
+    return NextResponse.json({ ok: false, error: e.message }, { status: 500 });
+  }
+}
