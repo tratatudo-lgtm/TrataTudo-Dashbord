@@ -52,6 +52,7 @@ export async function GET() {
     const activeCount = clients?.filter(c => c.status === 'active').length || 0;
     const trialCount = clients?.filter(c => c.status === 'trial').length || 0;
     const expiredCount = clients?.filter(c => c.status === 'expired').length || 0;
+    const totalCount = clients?.length || 0;
 
     // 3. Expiring soon (24h)
     const tomorrow = new Date();
@@ -65,16 +66,21 @@ export async function GET() {
     }) || [];
 
     return NextResponse.json({
-      activeCount,
-      trialCount,
-      expiredCount,
-      messagesToday,
-      expiringSoon
+      ok: true,
+      data: {
+        totalCount,
+        activeCount,
+        trialCount,
+        expiredCount,
+        messagesToday,
+        expiringSoon
+      }
     });
 
   } catch (error: any) {
     console.error('API Admin Stats GET Error:', error);
     return NextResponse.json({ 
+      ok: false,
       error: error.message,
       hint: 'Verifique se as tabelas "clients" e "messages" foram criadas no Supabase.'
     }, { status: 500 });

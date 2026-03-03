@@ -23,8 +23,7 @@ export async function GET(
       .single();
 
     if (error) throw error;
-
-    return NextResponse.json(data);
+    return NextResponse.json({ ok: true, data });
   } catch (error: any) {
     console.error('API Admin Clients GET ID Error:', error);
     return NextResponse.json({ ok: false, error: error.message, hint: 'Erro ao carregar detalhes do cliente.' }, { status: 500 });
@@ -57,8 +56,15 @@ export async function PATCH(
     if (payload.company_name && !payload.name) payload.name = payload.company_name;
     if (payload.trial_end && !payload.trial_ends_at) payload.trial_ends_at = payload.trial_end;
     if (payload.trial_ends_at && !payload.trial_end) payload.trial_end = payload.trial_ends_at;
-    if (payload.bot_instructions && !payload.system_prompt) payload.system_prompt = payload.bot_instructions;
-    if (payload.system_prompt && !payload.bot_instructions) payload.bot_instructions = payload.system_prompt;
+    
+    // Favor bot_instructions and remove old names
+    if (payload.system_prompt) {
+      payload.bot_instructions = payload.system_prompt;
+      delete payload.system_prompt;
+    }
+    if (payload.prompt) delete payload.prompt;
+    if (payload.instructions) delete payload.instructions;
+
     if (payload.instance_name && !payload.instance_id) payload.instance_id = payload.instance_name;
 
     const supabase = createAdminClient();
@@ -90,12 +96,12 @@ export async function PATCH(
           .single();
         
         if (retryError) throw retryError;
-        return NextResponse.json(retryData);
+        return NextResponse.json({ ok: true, data: retryData });
       }
       throw error;
     }
 
-    return NextResponse.json(data);
+    return NextResponse.json({ ok: true, data });
   } catch (error: any) {
     console.error('API Admin Clients PATCH Error:', error);
     return NextResponse.json({ ok: false, error: error.message, hint: 'Erro ao atualizar dados do cliente.' }, { status: 500 });

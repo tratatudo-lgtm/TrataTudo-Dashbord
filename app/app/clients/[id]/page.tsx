@@ -23,6 +23,7 @@ export default function ClientDetailsPage({
   const [recentMessages, setRecentMessages] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [savedFeedback, setSavedFeedback] = useState<'data' | 'prompt' | null>(null);
   const [generatingPrompt, setGeneratingPrompt] = useState(false);
   const [sendingTest, setSendingTest] = useState(false);
   const [subscribing, setSubscribing] = useState(false);
@@ -73,45 +74,57 @@ export default function ClientDetailsPage({
 
   const router = useRouter();
 
-  useEffect(() => {
-    async function fetchData() {
+  const fetchData = async () => {
+    setLoading(true);
+    try {
+      const res = await fetch(endpoint);
+      const text = await res.text();
+      
+      let json: any = {};
       try {
-        const res = await fetch(endpoint);
-        const clientData = await res.json();
-        if (!res.ok) {
-          throw new Error(clientData.error || 'Erro ao carregar cliente');
-        }
-        
-        if (clientData) {
-          setClient(clientData);
-          setCompanyName(clientData.company_name || clientData.name || '');
-          setPhoneE164(clientData.phone_e164 || clientData.phone || '');
-          setInstanceName(clientData.instance_name || '');
-          setProductionInstanceName(clientData.production_instance_name || '');
-          setStatus(clientData.status || 'trial');
-          
-          const tEnd = clientData.trial_end || clientData.trial_ends_at || clientData.trial_end_at;
-          setTrialEnd(tEnd ? tEnd.split('T')[0] : '');
-          
-          const instructions = clientData.bot_instructions || clientData.system_prompt || '';
-          setBotInstructions(instructions);
-          setTestPhone(clientData.phone_e164 || clientData.phone || '');
-          
-          // Check if "Responde sempre em Português de Portugal." is in the prompt
-          if (instructions.includes('Responde sempre em Português de Portugal.')) {
-            setForcePTPT(true);
-          }
-
-          fetchMessages(clientData.phone_e164 || clientData.phone);
-        }
-      } catch (err: any) {
-        console.error('Error fetching client details:', err);
-        setError(err.message);
-        setHint('Verifique se o ID do cliente é válido e se a tabela "clients" existe.');
-      } finally {
-        setLoading(false);
+        json = JSON.parse(text);
+      } catch (e) {
+        console.error('Failed to parse client detail JSON:', e, 'Raw text:', text);
+        json = { ok: false, error: 'Resposta inválida do servidor (JSON malformado)' };
       }
+
+      if (!res.ok || !json.ok) {
+        throw new Error(json.error || 'Erro ao carregar cliente');
+      }
+      
+      const clientData = json.data;
+      if (clientData) {
+        setClient(clientData);
+        setCompanyName(clientData.company_name || clientData.name || '');
+        setPhoneE164(clientData.phone_e164 || clientData.phone || '');
+        setInstanceName(clientData.instance_name || '');
+        setProductionInstanceName(clientData.production_instance_name || '');
+        setStatus(clientData.status || 'trial');
+        
+        const tEnd = clientData.trial_end || clientData.trial_ends_at || clientData.trial_end_at;
+        setTrialEnd(tEnd ? tEnd.split('T')[0] : '');
+        
+        const instructions = clientData.bot_instructions || clientData.system_prompt || '';
+        setBotInstructions(instructions);
+        setTestPhone(clientData.phone_e164 || clientData.phone || '');
+        
+        // Check if "Responde sempre em Português de Portugal." is in the prompt
+        if (instructions.includes('Responde sempre em Português de Portugal.')) {
+          setForcePTPT(true);
+        }
+
+        fetchMessages(clientData.phone_e164 || clientData.phone);
+      }
+    } catch (err: any) {
+      console.error('Error fetching client details:', err);
+      setError(err.message);
+      setHint('Verifique se o ID do cliente é válido e se a tabela "clients" existe.');
+    } finally {
+      setLoading(false);
     }
+  };
+
+  useEffect(() => {
     fetchData();
   }, [params.id]);
 
@@ -119,9 +132,16 @@ export default function ClientDetailsPage({
     if (!phone) return;
     try {
       const res = await fetch(`/api/messages?phone=${phone}&page=${msgPage}&limit=${pageSize}`);
-      if (!res.ok) throw new Error('Erro ao carregar mensagens');
-      const data = await res.json();
-      setRecentMessages(data.messages || []);
+      const text = await res.text();
+      try {
+        const data = JSON.parse(text);
+        if (res.ok && data.ok) {
+          const payload = data.data || {};
+          setRecentMessages(payload.messages || []);
+        }
+      } catch (e) {
+        console.error('Failed to parse messages JSON in client details:', e);
+      }
     } catch (err) {
       console.error('Error fetching messages:', err);
     }
@@ -158,8 +178,9 @@ export default function ClientDetailsPage({
       });
       if (!res.ok) throw new Error('Erro ao salvar dados');
       
-      alert('Dados salvos com sucesso!');
-      router.refresh();
+      await fetchData();
+      setSavedFeedback('data');
+      setTimeout(() => setSavedFeedback(null), 3000);
     } catch (error: any) {
       alert(error.message);
     } finally {
@@ -193,9 +214,9 @@ export default function ClientDetailsPage({
       const data = await res.json();
       if (!data.ok) throw new Error(data.error || 'Erro ao salvar prompt');
 
-      setBotInstructions(finalPrompt);
-      alert('Prompt salvo com sucesso!');
-      router.refresh();
+      await fetchData();
+      setSavedFeedback('prompt');
+      setTimeout(() => setSavedFeedback(null), 3000);
     } catch (error: any) {
       alert(error.message);
     } finally {
@@ -353,8 +374,8 @@ export default function ClientDetailsPage({
                   disabled={saving}
                   className="flex items-center gap-2 px-4 py-1.5 text-sm font-bold text-white bg-indigo-600 rounded-lg hover:bg-indigo-700 transition disabled:opacity-50 shadow-sm"
                 >
-                  {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
-                  Guardar Dados
+                  {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : (savedFeedback === 'data' ? <Check className="h-4 w-4" /> : <Save className="h-4 w-4" />)}
+                  {savedFeedback === 'data' ? 'Guardado' : 'Guardar Dados'}
                 </button>
               </div>
             </div>
@@ -452,8 +473,8 @@ export default function ClientDetailsPage({
                   disabled={saving}
                   className="flex items-center gap-2 px-4 py-1.5 text-sm font-bold text-white bg-indigo-600 rounded-lg hover:bg-indigo-700 transition disabled:opacity-50 shadow-sm"
                 >
-                  {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
-                  Guardar Prompt
+                  {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : (savedFeedback === 'prompt' ? <Check className="h-4 w-4" /> : <Save className="h-4 w-4" />)}
+                  {savedFeedback === 'prompt' ? 'Guardado' : 'Guardar Prompt'}
                 </button>
               </div>
             </div>

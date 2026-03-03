@@ -76,7 +76,7 @@ export async function GET(request: Request) {
       client_id: m.client_id || ''
     })) || [];
 
-    return NextResponse.json({ ok: true, messages: mappedMessages, count: count || 0 });
+    return NextResponse.json({ ok: true, data: { messages: mappedMessages, count: count || 0 } });
   } catch (error: any) {
     console.error('API Messages GET Error:', error);
     return NextResponse.json({ 

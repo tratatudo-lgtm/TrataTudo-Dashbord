@@ -8,7 +8,7 @@ export async function GET() {
     if (!isAdmin) return NextResponse.json({ ok: false, error: 'Não autorizado' }, { status: 401 });
 
     const instances = await fetchEvolutionInstances();
-    return NextResponse.json({ ok: true, instances });
+    return NextResponse.json({ ok: true, data: instances });
   } catch (error: any) {
     return NextResponse.json({ ok: false, error: error.message }, { status: 500 });
   }
@@ -26,7 +26,7 @@ export async function POST(request: Request) {
     if (!instanceName) return NextResponse.json({ ok: false, error: 'Nome da instância é obrigatório' }, { status: 400 });
 
     const result = await createEvolutionInstance(instanceName, number);
-    return NextResponse.json({ ok: true, result });
+    return NextResponse.json({ ok: true, data: result });
   } catch (error: any) {
     return NextResponse.json({ ok: false, error: error.message }, { status: 500 });
   }

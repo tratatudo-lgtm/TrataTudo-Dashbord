@@ -15,6 +15,7 @@ export default async function DashboardPage() {
   const endpoint = `${baseUrl}/api/admin/stats`;
   
   let stats = {
+    totalCount: 0,
     activeCount: 0,
     trialCount: 0,
     expiredCount: 0,
@@ -26,18 +27,18 @@ export default async function DashboardPage() {
 
   try {
     const res = await fetch(endpoint, { cache: 'no-store' });
+    const text = await res.text();
     
-    // Check if response is valid JSON
     let data: any = {};
     try {
-      data = await res.json();
+      data = JSON.parse(text);
     } catch (e) {
-      console.error('Failed to parse stats JSON:', e);
-      data = { error: 'Resposta inválida do servidor (JSON malformado)' };
+      console.error('Failed to parse stats JSON:', e, 'Raw text:', text);
+      data = { ok: false, error: 'Resposta inválida do servidor (JSON malformado)' };
     }
 
-    if (res.ok) {
-      stats = data;
+    if (res.ok && data.ok) {
+      stats = data.data || stats;
     } else {
       const errorMsg = data.error || 'Erro ao carregar estatísticas';
       const isPermissionError = errorMsg.toLowerCase().includes('permission') || 
@@ -60,7 +61,7 @@ export default async function DashboardPage() {
     hint = 'Erro crítico durante a renderização. Verifique os logs do servidor.';
   }
 
-  const { activeCount, trialCount, expiredCount, messagesToday, expiringSoon } = stats;
+  const { totalCount, activeCount, trialCount, expiredCount, messagesToday, expiringSoon } = stats;
 
   return (
     <div className="space-y-8">
@@ -83,11 +84,11 @@ export default async function DashboardPage() {
       {/* Stats Grid */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6">
         <StatsCard 
-          title="Clientes Ativos" 
-          value={activeCount} 
+          title="Total Clientes" 
+          value={totalCount || 0} 
           icon={Users} 
           color="emerald" 
-          trend="+2 este mês"
+          trend={`${activeCount || 0} ativos`}
         />
         <StatsCard 
           title="Em Trial" 

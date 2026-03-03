@@ -11,7 +11,7 @@ export async function GET(
     if (!isAdmin) return NextResponse.json({ ok: false, error: 'Não autorizado' }, { status: 401 });
 
     const qr = await getEvolutionInstanceQR(params.name);
-    return NextResponse.json({ ok: true, qr });
+    return NextResponse.json({ ok: true, data: qr });
   } catch (error: any) {
     return NextResponse.json({ ok: false, error: error.message }, { status: 500 });
   }

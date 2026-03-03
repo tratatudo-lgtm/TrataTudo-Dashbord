@@ -59,7 +59,7 @@ export async function GET(request: Request) {
       bot_instructions: c.bot_instructions || c.system_prompt || ''
     })) || [];
 
-    return NextResponse.json(mappedClients);
+    return NextResponse.json({ ok: true, data: mappedClients });
   } catch (error: any) {
     console.error('API Admin Clients GET Error:', error);
     return NextResponse.json({ ok: false, error: error.message, hint: 'Erro ao consultar a base de dados.' }, { status: 500 });
@@ -114,12 +114,12 @@ export async function POST(request: Request) {
           .single();
         
         if (retryError) throw retryError;
-        return NextResponse.json(retryData);
+        return NextResponse.json({ ok: true, data: retryData });
       }
       throw error;
     }
 
-    return NextResponse.json(data);
+    return NextResponse.json({ ok: true, data });
   } catch (error: any) {
     console.error('API Admin Clients POST Error:', error);
     return NextResponse.json({ ok: false, error: error.message, hint: 'Erro ao inserir na base de dados.' }, { status: 500 });

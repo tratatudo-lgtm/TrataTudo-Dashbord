@@ -15,7 +15,7 @@ export async function POST(
     const webhookUrl = `${baseUrl}/api/webhooks/evolution`;
     
     const result = await setEvolutionInstanceWebhook(params.name, webhookUrl);
-    return NextResponse.json({ ok: true, result });
+    return NextResponse.json({ ok: true, data: result });
   } catch (error: any) {
     return NextResponse.json({ ok: false, error: error.message }, { status: 500 });
   }

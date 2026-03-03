@@ -47,13 +47,16 @@ export async function GET(request: Request) {
       // If we got here, at least id, created_at, direction exist.
       // Now let's try to add text/body and phone/from_number
       return NextResponse.json({ 
-        messages: fallbackData.map((m: any) => ({
-          ...m,
-          text: m.text || m.body || m.content || 'Conteúdo indisponível',
-          phone: m.phone || m.from_number || m.sender || 'Desconhecido'
-        })), 
-        count: fallbackData.length,
-        schema_warning: 'Algumas colunas podem estar em falta na tabela "messages".'
+        ok: true,
+        data: {
+          messages: fallbackData.map((m: any) => ({
+            ...m,
+            text: m.text || m.body || m.content || 'Conteúdo indisponível',
+            phone: m.phone || m.from_number || m.sender || 'Desconhecido'
+          })), 
+          count: fallbackData.length,
+          schema_warning: 'Algumas colunas podem estar em falta na tabela "messages".'
+        }
       });
     }
 
@@ -65,7 +68,7 @@ export async function GET(request: Request) {
       to_number: m.to_number || m.receiver || ''
     })) || [];
 
-    return NextResponse.json({ messages: mappedMessages, count: count || 0 });
+    return NextResponse.json({ ok: true, data: { messages: mappedMessages, count: count || 0 } });
   } catch (error: any) {
     console.error('API Admin Messages GET Error:', error);
     return NextResponse.json({ ok: false, error: error.message, hint: 'Verifique se a tabela "messages" existe e tem as colunas corretas.' }, { status: 500 });

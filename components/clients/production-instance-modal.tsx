@@ -51,7 +51,12 @@ export function ProductionInstanceModal({
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ instanceName: name }),
       });
-      const createData = await createRes.json();
+      const createText = await createRes.json();
+      let createData: any = {};
+      try {
+        createData = createText; // createRes.json() already called
+      } catch (e) {}
+
       if (!createRes.ok && !createData.error?.includes('already exists')) {
         throw new Error(createData.error || 'Erro ao criar instância');
       }
@@ -78,13 +83,21 @@ export function ProductionInstanceModal({
     setLoadingAction(true);
     try {
       const qrRes = await fetch(`/api/evolution/instances/${name}/qr`);
-      const qrData = await qrRes.json();
-      if (!qrRes.ok) throw new Error(qrData.error || 'Erro ao obter QR Code');
+      const qrText = await qrRes.text();
+      let qrData: any = {};
+      try {
+        qrData = JSON.parse(qrText);
+      } catch (e) {
+        qrData = { ok: false, error: 'Erro ao processar QR Code' };
+      }
       
-      if (qrData.qr?.base64) {
-        setQrCode(qrData.qr.base64);
-      } else if (qrData.qr?.code) {
-        setQrCode(qrData.qr.code);
+      if (!qrRes.ok || !qrData.ok) throw new Error(qrData.error || 'Erro ao obter QR Code');
+      
+      const payload = qrData.data || {};
+      if (payload.base64) {
+        setQrCode(payload.base64);
+      } else if (payload.code) {
+        setQrCode(payload.code);
       }
     } catch (err: any) {
       console.error('QR Fetch Error:', err);
@@ -103,9 +116,16 @@ export function ProductionInstanceModal({
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ phone_e164: pairingPhone }),
       });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Erro ao obter código');
-      setPairingCode(data.code);
+      const text = await res.text();
+      let data: any = {};
+      try {
+        data = JSON.parse(text);
+      } catch (e) {
+        data = { ok: false, error: 'Erro ao processar código' };
+      }
+
+      if (!res.ok || !data.ok) throw new Error(data.error || 'Erro ao obter código');
+      setPairingCode(data.data?.code);
     } catch (err: any) {
       setError(err.message);
     } finally {
@@ -120,8 +140,14 @@ export function ProductionInstanceModal({
       interval = setInterval(async () => {
         try {
           const statusRes = await fetch(`/api/evolution/instances/${instanceName}/status`);
-          const statusData = await statusRes.json();
-          const state = statusData.status?.state || 'disconnected';
+          const statusText = await statusRes.text();
+          let statusData: any = {};
+          try {
+            statusData = JSON.parse(statusText);
+          } catch (e) {}
+
+          const payload = statusData.data || {};
+          const state = payload.state || 'disconnected';
           setStatus(state);
 
           if (state === 'open' || state === 'connected') {

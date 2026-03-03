@@ -14,7 +14,7 @@ export async function POST(
     if (!phone_e164) return NextResponse.json({ ok: false, error: 'Telefone é obrigatório para pairing code' }, { status: 400 });
 
     const result = await getEvolutionPairingCode(params.name, phone_e164);
-    return NextResponse.json({ ok: true, code: result.code || result });
+    return NextResponse.json({ ok: true, data: { code: result.code || result } });
   } catch (error: any) {
     return NextResponse.json({ ok: false, error: error.message }, { status: 500 });
   }

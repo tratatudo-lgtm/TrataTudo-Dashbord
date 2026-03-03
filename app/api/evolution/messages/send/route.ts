@@ -34,8 +34,8 @@ export async function POST(request: Request) {
       status: 'sent'
     });
 
-    return NextResponse.json({ success: true, result });
+    return NextResponse.json({ ok: true, data: result });
   } catch (error: any) {
-    return NextResponse.json({ error: error.message }, { status: 500 });
+    return NextResponse.json({ ok: false, error: error.message }, { status: 500 });
   }
 }

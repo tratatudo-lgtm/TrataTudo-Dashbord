@@ -11,7 +11,7 @@ export async function GET(
     if (!isAdmin) return NextResponse.json({ ok: false, error: 'Não autorizado' }, { status: 401 });
 
     const status = await getEvolutionInstanceStatus(params.name);
-    return NextResponse.json({ ok: true, status });
+    return NextResponse.json({ ok: true, data: status });
   } catch (error: any) {
     return NextResponse.json({ ok: false, error: error.message }, { status: 500 });
   }

@@ -23,13 +23,21 @@ export default function ClientsPage() {
     try {
       const endpoint = `/api/clients?status=${status}&q=${query}`;
       const res = await fetch(endpoint);
-      const json = await res.json();
+      const text = await res.text();
+      
+      let json: any = {};
+      try {
+        json = JSON.parse(text);
+      } catch (e) {
+        console.error('Failed to parse clients JSON:', e, 'Raw text:', text);
+        json = { ok: false, error: 'Resposta inválida do servidor (JSON malformado)' };
+      }
 
-      if (!json.ok) {
+      if (!res.ok || !json.ok) {
         throw new Error(json.error || 'Erro ao carregar clientes');
       }
 
-      setClients(json.data);
+      setClients(json.data || []);
     } catch (err: any) {
       console.error('Error in ClientsPage:', err);
       setError(err.message || 'Ocorreu um erro inesperado.');

@@ -38,9 +38,17 @@ export default function MessagesPage() {
     
     try {
       const res = await fetch(endpoint);
-      const data = await res.json();
+      const text = await res.text();
       
-      if (!res.ok) {
+      let data: any = {};
+      try {
+        data = JSON.parse(text);
+      } catch (e) {
+        console.error('Failed to parse messages JSON:', e, 'Raw text:', text);
+        data = { ok: false, error: 'Resposta inválida do servidor (JSON malformado)' };
+      }
+      
+      if (!res.ok || !data.ok) {
         const errorMsg = data.error || 'Erro ao carregar mensagens';
         setError(errorMsg);
         if (errorMsg.toLowerCase().includes('permission') || errorMsg.toLowerCase().includes('rls') || errorMsg.toLowerCase().includes('relation')) {
@@ -49,8 +57,9 @@ export default function MessagesPage() {
           setHint('Verifique a ligação à base de dados e as variáveis de ambiente.');
         }
       } else {
-        setMessages(data.messages || []);
-        setCount(data.count || 0);
+        const payload = data.data || {};
+        setMessages(payload.messages || []);
+        setCount(payload.count || 0);
       }
     } catch (err: any) {
       console.error('Error fetching messages:', err);
@@ -63,9 +72,14 @@ export default function MessagesPage() {
   const fetchClients = useCallback(async () => {
     try {
       const res = await fetch('/api/admin/clients');
-      if (res.ok) {
-        const data = await res.json();
-        setClients(data || []);
+      const text = await res.text();
+      try {
+        const data = JSON.parse(text);
+        if (res.ok && data.ok) {
+          setClients(data.data || []);
+        }
+      } catch (e) {
+        console.error('Failed to parse clients JSON in messages page:', e);
       }
     } catch (err) {
       console.error('Error fetching clients:', err);
