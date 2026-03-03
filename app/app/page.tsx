@@ -12,14 +12,22 @@ import {
 } from 'lucide-react';
 
 import Link from 'next/link';
+import { headers } from 'next/headers';
 import { StatsCard } from '@/components/stats-card';
 import DebugPanel from '@/components/debug-panel';
 
 export const dynamic = 'force-dynamic';
 
+function getRequestBaseUrl() {
+  const h = headers();
+  const host = h.get('x-forwarded-host') || h.get('host') || '';
+  const proto = h.get('x-forwarded-proto') || 'https';
+  return `${proto}://${host}`;
+}
+
 export default async function DashboardPage() {
-  // ✅ NUNCA MAIS depende de baseUrl/env/domínio
-  const endpoint = `/api/admin/stats`;
+  const baseUrl = getRequestBaseUrl();
+  const endpoint = `${baseUrl}/api/admin/stats`;
 
   let stats = {
     totalCount: 0,
@@ -37,33 +45,27 @@ export default async function DashboardPage() {
     const res = await fetch(endpoint, {
       cache: 'no-store',
       headers: {
-        // permite stats sem sessão (server-to-server)
+        // server-to-server (não depende da sessão)
         'x-tratatudo-key': process.env.TRATATUDO_API_KEY || '',
       },
     });
 
-    const contentType = res.headers.get('content-type') || '';
     const raw = await res.text();
 
-    const looksLikeHtml =
-      raw.trim().startsWith('<!doctype') ||
-      raw.trim().startsWith('<html') ||
-      raw.trim().startsWith('<') ||
-      raw.toLowerCase().includes('the deploy');
+    let data: any = null;
+    try {
+      data = JSON.parse(raw);
+    } catch (e: any) {
+      error = `Resposta inválida do servidor (JSON malformado)`;
+      hint = `O endpoint devolveu texto/HTML em vez de JSON. Snippet: ${raw.slice(0, 120)}`;
+    }
 
-    if (looksLikeHtml || !contentType.includes('application/json')) {
-      error = `Resposta inválida do servidor (não é JSON).`;
-      hint =
-        `Isto acontece quando o endpoint devolve HTML/texto (deploy/erro) ou quando estás a bater num domínio errado. ` +
-        `Confirma que estás em https://trata-tudo-dashbord.vercel.app.`;
-    } else {
-      const data = JSON.parse(raw);
-
-      if (res.ok && data.ok) {
+    if (!error) {
+      if (res.ok && data?.ok) {
         stats = data.data || stats;
       } else {
-        error = data.error || 'Erro ao carregar estatísticas';
-        hint = data.hint || 'Verifica logs do servidor.';
+        error = data?.error || `Erro ao carregar estatísticas (HTTP ${res.status})`;
+        hint = data?.hint || 'Verifica logs do servidor.';
       }
     }
   } catch (err: any) {
@@ -97,7 +99,6 @@ export default async function DashboardPage() {
         </div>
       )}
 
-      {/* Stats Grid */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6">
         <StatsCard
           title="Total Clientes"
@@ -112,7 +113,6 @@ export default async function DashboardPage() {
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
-        {/* Main Content: Alerts */}
         <div className="lg:col-span-2 space-y-8">
           <section className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
             <div className="p-6 border-b border-slate-100 flex items-center justify-between">
@@ -165,7 +165,6 @@ export default async function DashboardPage() {
             </div>
           </section>
 
-          {/* Ações Rápidas */}
           <section className="grid grid-cols-1 sm:grid-cols-3 gap-4">
             <Link
               href="/app/clients"
@@ -196,7 +195,6 @@ export default async function DashboardPage() {
           </section>
         </div>
 
-        {/* Sidebar */}
         <div className="space-y-8">
           <section className="bg-slate-900 rounded-2xl p-8 text-white shadow-xl relative overflow-hidden">
             <div className="absolute top-0 right-0 p-4 opacity-10">
@@ -241,7 +239,7 @@ export default async function DashboardPage() {
                 <Zap className="h-5 w-5" />
               </div>
               <p className="text-xs text-slate-500 leading-relaxed">
-                Bots com prompts que incluem o horário de funcionamento da empresa têm menos intervenção humana necessária.
+                Bots com prompts bem definidos reduzem intervenção humana e aumentam satisfação do cliente.
               </p>
             </div>
           </section>
