@@ -1,0 +1,132 @@
+import { NextResponse } from "next/server";
+import { createClient as createSbAdmin } from "@supabase/supabase-js";
+
+function getSupabaseAdmin() {
+  const url = process.env.NEXT_PUBLIC_SUPABASE_URL!;
+  const key = process.env.SUPABASE_SERVICE_ROLE_KEY!;
+  if (!url || !key) throw new Error("Missing Supabase env vars");
+  return createSbAdmin(url, key, { auth: { persistSession: false } });
+}
+
+function unauthorized() {
+  return NextResponse.json({ ok: false, error: "Não autorizado" }, { status: 401 });
+}
+
+function bad(msg: string, status = 400) {
+  return NextResponse.json({ ok: false, error: msg }, { status });
+}
+
+function normalizeE164(phone: string) {
+  // assume que já vem E.164 do webhook; mantém simples
+  return String(phone || "").trim();
+}
+
+function minutesAgo(d: string | Date) {
+  const t = typeof d === "string" ? new Date(d).getTime() : d.getTime();
+  return (Date.now() - t) / 60000;
+}
+
+// Detetor simples para arrancar fluxos quando não há estado
+function detectIntent(text: string) {
+  const t = text.toLowerCase();
+  if (t.includes("atestado")) return "request_certificate";
+  if (t.includes("reclama") || t.includes("buraco") || t.includes("lixo") || t.includes("ilumina"))
+    return "complaint";
+  if (t.startsWith("estado") || t.includes("tt-")) return "check_status";
+  return "generic";
+}
+
+function short(s: string) {
+  return s.replace(/\s+/g, " ").trim();
+}
+
+type State = {
+  id: number;
+  client_id: number;
+  phone_e164: string;
+  intent: string;
+  step: string;
+  data: any;
+  updated_at: string;
+};
+
+async function loadState(supabase: any, client_id: number, phone_e164: string): Promise<State | null> {
+  const { data, error } = await supabase
+    .from("conversation_state")
+    .select("id, client_id, phone_e164, intent, step, data, updated_at")
+    .eq("client_id", client_id)
+    .eq("phone_e164", phone_e164)
+    .maybeSingle();
+
+  if (error) throw error;
+  return data || null;
+}
+
+async function upsertState(
+  supabase: any,
+  client_id: number,
+  phone_e164: string,
+  patch: Partial<{ intent: string; step: string; data: any; last_user_message: string; last_bot_message: string }>
+) {
+  const { data, error } = await supabase
+    .from("conversation_state")
+    .upsert(
+      [
+        {
+          client_id,
+          phone_e164,
+          intent: patch.intent || "generic",
+          step: patch.step || "start",
+          data: patch.data || {},
+          last_user_message: patch.last_user_message || null,
+          last_bot_message: patch.last_bot_message || null,
+        },
+      ],
+      { onConflict: "client_id,phone_e164" }
+    )
+    .select("id, intent, step, data, updated_at")
+    .single();
+
+  if (error) throw error;
+  return data;
+}
+
+async function clearState(supabase: any, client_id: number, phone_e164: string) {
+  await supabase.from("conversation_state").delete().eq("client_id", client_id).eq("phone_e164", phone_e164);
+}
+
+// ---- Fluxo: ATESTADO (máquina de estados) ----
+// passos: awaiting_type -> awaiting_name -> awaiting_address -> awaiting_purpose -> confirm
+function isYes(txt: string) {
+  const t = txt.toLowerCase().trim();
+  return ["sim", "s", "ok", "confirmo", "confirmar", "certo", "isso"].includes(t);
+}
+
+function isNo(txt: string) {
+  const t = txt.toLowerCase().trim();
+  return ["não", "nao", "n", "nop", "errado"].includes(t);
+}
+
+function guessCertType(txt: string) {
+  const t = txt.toLowerCase();
+  if (t.includes("resid")) return "Residência";
+  if (t.includes("morad")) return "Residência";
+  if (t.includes("trabal")) return "Trabalho";
+  if (t.includes("agreg")) return "Agregado";
+  return null;
+}
+
+function friendlyBotName() {
+  return "Valenciano";
+}
+
+function entityName() {
+  return "União das Freguesias de Valença, Cristelo Covo e Arão";
+}
+
+export async function POST(req: Request) {
+  try {
+    // 🔐 proteger com a mesma chave que já usas
+    const apiKey = req.headers.get("x-tratatudo-key") || "";
+    const expected = process.env.ADMIN_API_KEY || "";
+    if (!expected || api
