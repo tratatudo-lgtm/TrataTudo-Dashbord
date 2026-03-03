@@ -14,26 +14,6 @@ function getSupabaseAdmin() {
   return createSupabaseAdmin(url, key, { auth: { persistSession: false } });
 }
 
-function normalizeMapsUrl(input: string) {
-  if (!input) return '';
-  if (input.startsWith('http')) return input;
-  return `https://${input}`;
-}
-
-async function resolveRedirect(url: string) {
-  const res = await fetch(url, { redirect: 'follow' });
-  return res.url || url;
-}
-
-function extractPlaceIdFromUrl(urlStr: string): string | null {
-  const match = urlStr.match(/(ChI[a-zA-Z0-9_-]{10,})/);
-  return match?.[1] || null;
-}
-
-/* ============================
-   🔥 CLASSIFICAÇÃO INTELIGENTE
-============================ */
-
 type BusinessCategory =
   | 'FOOD_SERVICE'
   | 'APPOINTMENT_BASED'
@@ -75,31 +55,20 @@ function classifyBusiness(types: string[] = []): BusinessCategory {
   return 'OTHER';
 }
 
-/* ============================
-   🔥 OVERRIDE POR NOME
-============================ */
-
 function classifyByNameFallback(name: string, current: BusinessCategory): BusinessCategory {
-  if (!name) return current;
-
   const n = name.toLowerCase();
 
   if (
     n.includes('união das freguesias') ||
     n.includes('junta de freguesia') ||
     n.includes('câmara municipal') ||
-    n.includes('município') ||
-    n.includes('serviços municipal')
+    n.includes('município')
   ) {
     return 'PUBLIC_SERVICE';
   }
 
   return current;
 }
-
-/* ============================
-   🔥 CAPABILITIES
-============================ */
 
 function suggestCapabilities(category: BusinessCategory) {
   const base = {
@@ -113,6 +82,13 @@ function suggestCapabilities(category: BusinessCategory) {
     accept_requests: false,
   };
 
+  if (category === 'PUBLIC_SERVICE')
+    return {
+      ...base,
+      accept_complaints: true,
+      accept_requests: true,
+    };
+
   if (category === 'FOOD_SERVICE')
     return { ...base, accept_orders: true, accept_bookings: true };
 
@@ -122,19 +98,30 @@ function suggestCapabilities(category: BusinessCategory) {
   if (category === 'RETAIL_STORE')
     return { ...base, accept_orders: true };
 
-  if (category === 'PUBLIC_SERVICE')
-    return {
-      ...base,
-      accept_complaints: true,
-      accept_requests: true,
-    };
-
   return base;
 }
 
-/* ============================
-   🔥 GOOGLE DETAILS
-============================ */
+async function findPlaceIdFromText(text: string) {
+  const key = process.env.GOOGLE_PLACES_API_KEY;
+  if (!key) throw new Error('Missing GOOGLE_PLACES_API_KEY');
+
+  const url =
+    `https://maps.googleapis.com/maps/api/place/findplacefromtext/json` +
+    `?input=${encodeURIComponent(text)}` +
+    `&inputtype=textquery` +
+    `&fields=place_id,name,formatted_address,types` +
+    `&language=pt-PT` +
+    `&key=${key}`;
+
+  const res = await fetch(url, { cache: 'no-store' });
+  const json = await res.json();
+
+  if (!res.ok || json.status !== 'OK' || !json.candidates?.length) {
+    throw new Error(`Google FindPlace error: ${json.status}`);
+  }
+
+  return json.candidates[0].place_id;
+}
 
 async function fetchPlaceDetails(placeId: string) {
   const key = process.env.GOOGLE_PLACES_API_KEY;
@@ -151,15 +138,11 @@ async function fetchPlaceDetails(placeId: string) {
   const json = await res.json();
 
   if (!res.ok || json.status !== 'OK') {
-    throw new Error(`Google Places error: ${json.status}`);
+    throw new Error(`Google Details error: ${json.status}`);
   }
 
   return json.result;
 }
-
-/* ============================
-   🚀 MAIN
-============================ */
 
 export async function POST(req: Request) {
   try {
@@ -168,17 +151,12 @@ export async function POST(req: Request) {
 
     const body = await req.json();
     const client_id = Number(body.client_id);
-    const maps_url = normalizeMapsUrl(body.maps_url);
+    const place_name = body.place_name;
 
-    if (!client_id || !maps_url)
-      return NextResponse.json({ ok: false, error: 'client_id e maps_url são obrigatórios' }, { status: 400 });
+    if (!client_id || !place_name)
+      return NextResponse.json({ ok: false, error: 'client_id e place_name são obrigatórios' }, { status: 400 });
 
-    const finalUrl = await resolveRedirect(maps_url);
-    const placeId = extractPlaceIdFromUrl(finalUrl);
-
-    if (!placeId)
-      return NextResponse.json({ ok: false, error: 'Não consegui extrair place_id' }, { status: 400 });
-
+    const placeId = await findPlaceIdFromText(place_name);
     const place = await fetchPlaceDetails(placeId);
 
     let category = classifyBusiness(place.types || []);
@@ -191,7 +169,6 @@ export async function POST(req: Request) {
     const { data, error } = await supabase
       .from('clients')
       .update({
-        maps_url,
         maps_place_id: placeId,
         maps_data: place,
         business_category: category,
@@ -210,7 +187,6 @@ export async function POST(req: Request) {
         client: data,
         summary: {
           name: place.name,
-          address: place.formatted_address,
           category,
           capabilities,
         },
