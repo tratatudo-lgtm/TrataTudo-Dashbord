@@ -1,4 +1,3 @@
-import Link from 'next/link';
 import {
   Users,
   MessageSquare,
@@ -12,29 +11,16 @@ import {
   ArrowUpRight,
 } from 'lucide-react';
 
-import { createClient } from '@/lib/supabase/server';
+import Link from 'next/link';
 import { StatsCard } from '@/components/stats-card';
 import DebugPanel from '@/components/debug-panel';
+import { getBaseUrl } from '@/lib/baseUrl';
 
 export const dynamic = 'force-dynamic';
 
-function startOfTodayISO() {
-  const d = new Date();
-  d.setHours(0, 0, 0, 0);
-  return d.toISOString();
-}
-
-function addHoursISO(hours: number) {
-  const d = new Date();
-  d.setHours(d.getHours() + hours);
-  return d.toISOString();
-}
-
 export default async function DashboardPage() {
-  const supabase = createClient();
-
-  const { data: sessionData } = await supabase.auth.getSession();
-  const session = sessionData?.session;
+  const baseUrl = getBaseUrl();
+  const endpoint = `${baseUrl}/api/admin/stats`;
 
   let stats = {
     totalCount: 0,
@@ -42,108 +28,49 @@ export default async function DashboardPage() {
     trialCount: 0,
     expiredCount: 0,
     messagesToday: 0,
-    expiringSoon: [] as any[],
+    expiringSoon: [],
   };
 
   let error: string | null = null;
   let hint: string | null = null;
 
   try {
-    if (!session) {
-      error = 'Não autenticado';
-      hint = 'Faz login na dashboard para ver estatísticas.';
-      throw new Error('no-session');
+    const res = await fetch(endpoint, {
+      cache: 'no-store',
+      headers: {
+        'x-tratatudo-key': process.env.TRATATUDO_API_KEY || '',
+      },
+    });
+
+    const data = await res.json();
+
+    if (!res.ok || !data.ok) {
+      error = data.error || 'Erro ao carregar estatísticas';
+      hint = data.hint || 'Verifica permissões ou variáveis de ambiente.';
+    } else {
+      stats = data.data || stats;
     }
-
-    // 1) Confirmar se é admin (RLS + tabela admins)
-    const adminCheck = await supabase
-      .from('admins')
-      .select('user_id')
-      .eq('user_id', session.user.id)
-      .maybeSingle();
-
-    if (adminCheck.error) throw adminCheck.error;
-
-    if (!adminCheck.data) {
-      error = 'Não autenticado';
-      hint = 'Apenas administradores podem ver estatísticas.';
-      throw new Error('not-admin');
-    }
-
-    // 2) Contagens de clientes
-    const totalRes = await supabase.from('clients').select('id', { count: 'exact', head: true });
-    if (totalRes.error) throw totalRes.error;
-
-    const activeRes = await supabase
-      .from('clients')
-      .select('id', { count: 'exact', head: true })
-      .eq('status', 'active');
-    if (activeRes.error) throw activeRes.error;
-
-    const trialRes = await supabase
-      .from('clients')
-      .select('id', { count: 'exact', head: true })
-      .eq('status', 'trial');
-    if (trialRes.error) throw trialRes.error;
-
-    // Expirados: status='expired' OU trial_end < agora
-    const nowISO = new Date().toISOString();
-
-    const expiredStatusRes = await supabase
-      .from('clients')
-      .select('id', { count: 'exact', head: true })
-      .eq('status', 'expired');
-    if (expiredStatusRes.error) throw expiredStatusRes.error;
-
-    const expiredTrialRes = await supabase
-      .from('clients')
-      .select('id', { count: 'exact', head: true })
-      .eq('status', 'trial')
-      .lt('trial_end', nowISO);
-    if (expiredTrialRes.error) throw expiredTrialRes.error;
-
-    // 3) Mensagens hoje (wa_messages)
-    const todayISO = startOfTodayISO();
-    const msgsRes = await supabase
-      .from('wa_messages')
-      .select('id', { count: 'exact', head: true })
-      .gte('created_at', todayISO);
-    if (msgsRes.error) throw msgsRes.error;
-
-    // 4) Expira em 24h (trial_end entre agora e +24h)
-    const soonISO = addHoursISO(24);
-    const soonRes = await supabase
-      .from('clients')
-      .select('id, company_name, status, trial_end')
-      .eq('status', 'trial')
-      .gte('trial_end', nowISO)
-      .lte('trial_end', soonISO)
-      .order('trial_end', { ascending: true })
-      .limit(20);
-    if (soonRes.error) throw soonRes.error;
-
-    stats = {
-      totalCount: totalRes.count || 0,
-      activeCount: activeRes.count || 0,
-      trialCount: trialRes.count || 0,
-      expiredCount: (expiredStatusRes.count || 0) + (expiredTrialRes.count || 0),
-      messagesToday: msgsRes.count || 0,
-      expiringSoon: soonRes.data || [],
-    };
-  } catch (e: any) {
-    if (!error) {
-      error = e?.message || 'Erro inesperado';
-      hint = 'Verifica permissões (RLS) e se as tabelas existem.';
-    }
+  } catch (err: any) {
+    error = err.message || 'Erro crítico durante renderização.';
+    hint = 'Verifica logs do servidor.';
   }
 
-  const { totalCount, activeCount, trialCount, expiredCount, messagesToday, expiringSoon } = stats;
+  const {
+    totalCount,
+    activeCount,
+    trialCount,
+    expiredCount,
+    messagesToday,
+    expiringSoon,
+  } = stats;
 
   return (
     <div className="space-y-8">
       <div>
         <h1 className="text-3xl font-bold text-slate-900">Dashboard</h1>
-        <p className="text-slate-500 mt-1">Bem-vindo ao TrataTudo. Aqui está o resumo da tua operação.</p>
+        <p className="text-slate-500 mt-1">
+          Bem-vindo ao TrataTudo. Aqui está o resumo da sua operação.
+        </p>
       </div>
 
       {error && (
@@ -152,7 +79,11 @@ export default async function DashboardPage() {
           <div>
             <h3 className="text-rose-900 font-bold">Erro ao carregar dados</h3>
             <p className="text-rose-700 text-sm mt-1">{error}</p>
-            {hint && <p className="text-rose-600 text-xs mt-2 font-medium">💡 Sugestão: {hint}</p>}
+            {hint && (
+              <p className="text-rose-600 text-xs mt-2 font-medium">
+                💡 Sugestão: {hint}
+              </p>
+            )}
           </div>
         </div>
       )}
@@ -166,8 +97,18 @@ export default async function DashboardPage() {
           color="emerald"
           trend={`${activeCount || 0} ativos`}
         />
-        <StatsCard title="Em Trial" value={trialCount || 0} icon={Clock} color="indigo" />
-        <StatsCard title="Expirados" value={expiredCount || 0} icon={AlertCircle} color="rose" />
+        <StatsCard
+          title="Em Trial"
+          value={trialCount || 0}
+          icon={Clock}
+          color="indigo"
+        />
+        <StatsCard
+          title="Expirados"
+          value={expiredCount || 0}
+          icon={AlertCircle}
+          color="rose"
+        />
         <StatsCard
           title="Mensagens Hoje"
           value={messagesToday || 0}
@@ -177,7 +118,7 @@ export default async function DashboardPage() {
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
-        {/* Main */}
+        {/* Alertas */}
         <div className="lg:col-span-2 space-y-8">
           <section className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
             <div className="p-6 border-b border-slate-100 flex items-center justify-between">
@@ -206,10 +147,10 @@ export default async function DashboardPage() {
                       </p>
                       <p className="text-xs text-slate-500">
                         Expira em{' '}
-                        {new Date(client.trial_end).toLocaleTimeString('pt-PT', {
-                          hour: '2-digit',
-                          minute: '2-digit',
-                        })}
+                        {new Date(client.trial_end).toLocaleTimeString(
+                          'pt-PT',
+                          { hour: '2-digit', minute: '2-digit' }
+                        )}
                       </p>
                     </div>
                   </div>
@@ -230,44 +171,11 @@ export default async function DashboardPage() {
               )}
             </div>
           </section>
-
-          <section className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-            <Link
-              href="/app/clients"
-              className="bg-indigo-600 p-6 rounded-2xl text-white shadow-lg shadow-indigo-200 hover:bg-indigo-700 transition group"
-            >
-              <Plus className="h-8 w-8 mb-4 group-hover:scale-110 transition-transform" />
-              <h3 className="font-bold">Novo Cliente</h3>
-              <p className="text-indigo-100 text-xs mt-1">Adicionar empresa e bot</p>
-            </Link>
-
-            <Link
-              href="/app/messages"
-              className="bg-white p-6 rounded-2xl border border-slate-200 hover:border-indigo-300 transition group"
-            >
-              <MessageSquare className="h-8 w-8 mb-4 text-indigo-600 group-hover:scale-110 transition-transform" />
-              <h3 className="font-bold text-slate-900">Ver Mensagens</h3>
-              <p className="text-slate-500 text-xs mt-1">Histórico global</p>
-            </Link>
-
-            <Link
-              href="/app/settings"
-              className="bg-white p-6 rounded-2xl border border-slate-200 hover:border-indigo-300 transition group"
-            >
-              <Settings className="h-8 w-8 mb-4 text-slate-400 group-hover:scale-110 transition-transform" />
-              <h3 className="font-bold text-slate-900">Configurar APIs</h3>
-              <p className="text-slate-500 text-xs mt-1">Estado do sistema</p>
-            </Link>
-          </section>
         </div>
 
         {/* Sidebar */}
         <div className="space-y-8">
-          <section className="bg-slate-900 rounded-2xl p-8 text-white shadow-xl relative overflow-hidden">
-            <div className="absolute top-0 right-0 p-4 opacity-10">
-              <TrendingUp className="h-24 w-24" />
-            </div>
-
+          <section className="bg-slate-900 rounded-2xl p-8 text-white shadow-xl">
             <h3 className="text-indigo-400 text-xs font-bold uppercase tracking-widest mb-6">
               Performance Hoje
             </h3>
@@ -298,25 +206,12 @@ export default async function DashboardPage() {
               Ver Relatório Completo <ArrowUpRight className="h-3 w-3" />
             </button>
           </section>
-
-          <section className="bg-white rounded-2xl border border-slate-200 p-6 shadow-sm">
-            <h3 className="text-slate-900 font-bold mb-4">Dica do Dia</h3>
-            <div className="flex gap-4">
-              <div className="h-10 w-10 shrink-0 rounded-full bg-indigo-50 flex items-center justify-center text-indigo-600">
-                <Zap className="h-5 w-5" />
-              </div>
-              <p className="text-xs text-slate-500 leading-relaxed">
-                Bots com prompts que incluem o horário de funcionamento da empresa têm 30% menos
-                intervenção humana necessária.
-              </p>
-            </div>
-          </section>
         </div>
       </div>
 
       <DebugPanel
         title="Debug Dashboard"
-        endpoint="(Supabase direto - sem /api/admin/stats)"
+        endpoint={endpoint}
         error={error || undefined}
         hint={hint || undefined}
         data={stats}
