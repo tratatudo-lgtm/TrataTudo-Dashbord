@@ -1,88 +1,72 @@
-import { createAdminClient } from '@/lib/supabase/admin';
-import { NextResponse } from 'next/server';
-import { validateAdmin } from '@/lib/auth-admin';
+import { NextResponse } from "next/server";
+import { createClient } from "@supabase/supabase-js";
 
-export const dynamic = 'force-dynamic';
-export const runtime = 'nodejs';
+function getSupabaseAdmin() {
+  const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
+  const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
-export async function GET(request: Request) {
+  if (!url || !serviceKey) {
+    throw new Error("Missing Supabase env vars (URL or SERVICE_ROLE_KEY).");
+  }
+
+  return createClient(url, serviceKey, {
+    auth: { persistSession: false },
+  });
+}
+
+/**
+ * GET /api/messages
+ * Query params:
+ *  - phone: string (optional) -> filters by phone_e164
+ *  - instance: string (optional)
+ *  - limit: number (optional, default 200, max 500)
+ */
+export async function GET(req: Request) {
   try {
-    // 1. Validate Admin
-    const { isAdmin, error: authError, status: authStatus } = await validateAdmin();
-    if (!isAdmin) {
-      return NextResponse.json({ ok: false, error: authError }, { status: authStatus });
-    }
+    const supabase = getSupabaseAdmin();
 
-    // 2. Parse Query Params
-    const { searchParams } = new URL(request.url);
-    const phone = searchParams.get('phone');
-    const clientId = searchParams.get('client_id');
-    const query = searchParams.get('q');
-    const direction = searchParams.get('direction');
-    const page = parseInt(searchParams.get('page') || '1');
-    const limit = parseInt(searchParams.get('limit') || '50');
-    const offset = (page - 1) * limit;
+    const { searchParams } = new URL(req.url);
+    const phone = searchParams.get("phone");
+    const instance = searchParams.get("instance");
 
-    const supabase = createAdminClient();
-    
-    // 3. Determine Table Name (messages or wa_messages)
-    // We'll try 'messages' first, then 'wa_messages'
-    let tableName = 'messages';
-    
-    // Check if table exists by doing a small select
-    const { error: checkError } = await supabase.from(tableName).select('id').limit(1);
-    if (checkError && (checkError.code === '42P01' || checkError.message.includes('does not exist'))) {
-      tableName = 'wa_messages';
-    }
+    const limitRaw = Number(searchParams.get("limit") || "200");
+    const limit = Number.isFinite(limitRaw) ? Math.min(Math.max(limitRaw, 1), 500) : 200;
 
-    // 4. Build Query
-    let dbQuery = supabase.from(tableName).select('*', { count: 'exact' });
+    let q = supabase
+      .from("wa_messages")
+      .select("id, phone_e164, instance, direction, text, raw, created_at")
+      .order("created_at", { ascending: false })
+      .limit(limit);
 
-    if (phone) {
-      dbQuery = dbQuery.or(`phone.eq.${phone},from_number.eq.${phone},to_number.eq.${phone},remote_jid.ilike.%${phone}%`);
-    }
+    if (phone) q = q.eq("phone_e164", phone);
+    if (instance) q = q.eq("instance", instance);
 
-    if (clientId) {
-      dbQuery = dbQuery.eq('client_id', clientId);
-    }
-
-    if (direction && direction !== 'all') {
-      dbQuery = dbQuery.eq('direction', direction);
-    }
-
-    if (query) {
-      // Try common text columns
-      dbQuery = dbQuery.or(`text.ilike.%${query}%,body.ilike.%${query}%,content.ilike.%${query}%`);
-    }
-
-    // 5. Execute Query
-    const { data, error, count } = await dbQuery
-      .order('created_at', { ascending: false })
-      .range(offset, offset + limit - 1);
+    const { data, error } = await q;
 
     if (error) {
-      console.error(`Supabase ${tableName} Error:`, error);
-      throw error;
+      return NextResponse.json(
+        { ok: false, error: error.message, code: (error as any).code ?? null },
+        { status: 500 }
+      );
     }
 
-    // 6. Map Data for UI Consistency
-    const mappedMessages = data?.map((m: any) => ({
+    // Compat: se a UI espera "phone", mapeamos aqui.
+    const mapped = (data || []).map((m: any) => ({
       id: m.id,
-      created_at: m.created_at || m.timestamp || new Date().toISOString(),
-      direction: m.direction || 'in',
-      text: m.text || m.body || m.content || m.message || '',
-      phone: m.phone || m.from_number || m.sender || m.remote_jid?.split('@')[0] || 'Desconhecido',
-      instance_name: m.instance_name || m.instance || '',
-      client_id: m.client_id || ''
-    })) || [];
+      phone: m.phone_e164,
+      phone_e164: m.phone_e164,
+      instance: m.instance,
+      direction: m.direction,
+      text: m.text,
+      raw: m.raw,
+      created_at: m.created_at,
+    }));
 
-    return NextResponse.json({ ok: true, data: { messages: mappedMessages, count: count || 0 } });
-  } catch (error: any) {
-    console.error('API Messages GET Error:', error);
-    return NextResponse.json({ 
-      ok: false, 
-      error: error.message || 'Erro interno ao buscar mensagens',
-      hint: 'Verifique se a tabela "messages" ou "wa_messages" existe no Supabase.'
-    }, { status: 500 });
+    return NextResponse.json({ ok: true, data: mapped });
+  } catch (err: any) {
+    return NextResponse.json(
+      { ok: false, error: err?.message || "Unknown error" },
+      { status: 500 }
+    );
   }
 }
