@@ -1,32 +1,28 @@
-import {
-  Users, MessageSquare, Zap, Clock,
-  TrendingUp, AlertCircle, Plus, Settings,
-  ChevronRight, ArrowUpRight
-} from 'lucide-react';
 import Link from 'next/link';
 import { headers } from 'next/headers';
+import { Users, MessageSquare, Clock, AlertCircle, ChevronRight, Plus, Settings } from 'lucide-react';
 
 import { StatsCard } from '@/components/stats-card';
-import { DebugPanel } from '@/components/debug-panel';
+import DebugPanel from '@/components/debug-panel';
 
 export const dynamic = 'force-dynamic';
 
 function resolveBaseUrl() {
-  // 1) Se definires esta env na Vercel, é a melhor (ex: https://trata-tudo-dashbord.vercel.app)
+  // 1) se definires na Vercel (recomendado): https://trata-tudo-dashbord.vercel.app
   const site = process.env.NEXT_PUBLIC_SITE_URL;
   if (site && site.startsWith('http')) return site.replace(/\/$/, '');
 
-  // 2) Vercel fornece VERCEL_URL sem protocolo (ex: trata-tudo-dashbord.vercel.app)
+  // 2) Vercel fornece VERCEL_URL sem protocolo
   const vercel = process.env.VERCEL_URL;
   if (vercel) return `https://${vercel}`;
 
-  // 3) Fallback por headers (runtime request)
+  // 3) fallback por headers
   const h = headers();
   const proto = h.get('x-forwarded-proto') || 'https';
   const host = h.get('x-forwarded-host') || h.get('host');
   if (host) return `${proto}://${host}`;
 
-  // 4) Último fallback fixo
+  // 4) último fallback fixo
   return 'https://trata-tudo-dashbord.vercel.app';
 }
 
@@ -40,228 +36,131 @@ export default async function DashboardPage() {
     trialCount: 0,
     expiredCount: 0,
     messagesToday: 0,
-    expiringSoon: []
+    expiringSoon: [] as any[],
   };
 
   let error: string | null = null;
-  let hint: string | undefined = undefined;
+  let hint: string | null = null;
 
   try {
     const res = await fetch(endpoint, { cache: 'no-store' });
     const text = await res.text();
 
-    let data: any = {};
+    let json: any;
     try {
-      data = JSON.parse(text);
-    } catch (e) {
-      console.error('Failed to parse stats JSON:', e, 'Raw text:', text);
-      data = { ok: false, error: 'Resposta inválida do servidor (JSON malformado)' };
+      json = JSON.parse(text);
+    } catch {
+      json = { ok: false, error: 'Resposta inválida do servidor (JSON malformado)' };
     }
 
-    if (res.ok && data.ok) {
-      stats = data.data || stats;
+    if (res.ok && json.ok) {
+      stats = json.data || stats;
     } else {
-      const errorMsg = data.error || 'Erro ao carregar estatísticas';
-      const isPermissionError =
-        errorMsg.toLowerCase().includes('permission') ||
-        errorMsg.toLowerCase().includes('rls') ||
-        errorMsg.toLowerCase().includes('policy') ||
-        errorMsg.toLowerCase().includes('not found') ||
-        errorMsg.toLowerCase().includes('relation') ||
-        res.status === 401;
-
-      error = errorMsg;
-
+      error = json.error || 'Erro ao carregar estatísticas';
       if (res.status === 401) {
         hint = 'Não autenticado como admin. Faz login e garante que o teu utilizador está na tabela "admins".';
-      } else if (isPermissionError) {
-        hint = 'Sem permissões ou tabela inexistente. Verifique RLS e se as tabelas existem.';
       } else {
-        hint = 'Verifique a ligação ao Supabase e variáveis de ambiente.';
+        hint = 'Verifica RLS/permissões e se as tabelas existem.';
       }
-
-      console.error('Stats API Error:', { status: res.status, data });
     }
-  } catch (err: any) {
-    console.error('Critical Error in DashboardPage SSR:', err);
-    error = err.message || 'Ocorreu um erro inesperado no servidor.';
-    hint = 'Erro crítico durante a renderização. Verifique os logs do servidor.';
+  } catch (e: any) {
+    error = e?.message || 'Erro inesperado no servidor';
+    hint = 'Falha no SSR fetch. Verifica o endpoint/baseUrl.';
   }
 
-  const { totalCount, activeCount, trialCount, expiredCount, messagesToday, expiringSoon } = stats;
+  const totalCount = stats.totalCount || 0;
+  const activeCount = stats.activeCount || 0;
+  const trialCount = stats.trialCount || 0;
+  const expiredCount = stats.expiredCount || 0;
+  const messagesToday = stats.messagesToday || 0;
+  const expiringSoon: any[] = Array.isArray(stats.expiringSoon) ? stats.expiringSoon : [];
 
   return (
-    <div className="space-y-8">
+    <div className="space-y-6">
       <div>
-        <h1 className="text-3xl font-bold text-slate-900">Dashboard</h1>
-        <p className="text-slate-500 mt-1">Bem-vindo ao TrataTudo. Aqui está o resumo da sua operação.</p>
+        <h1 className="text-2xl font-semibold">Dashboard</h1>
+        <p className="text-sm text-muted-foreground">Resumo do sistema TrataTudo.</p>
       </div>
 
       {error && (
-        <div className="bg-rose-50 border border-rose-200 rounded-2xl p-6 flex items-start gap-4">
-          <AlertCircle className="h-6 w-6 text-rose-600 shrink-0 mt-0.5" />
-          <div>
-            <h3 className="text-rose-900 font-bold">Erro ao carregar dados</h3>
-            <p className="text-rose-700 text-sm mt-1">{error}</p>
-            {hint && <p className="text-rose-600 text-xs mt-2 font-medium">💡 Sugestão: {hint}</p>}
+        <div className="rounded-2xl border border-rose-200 bg-rose-50 p-4">
+          <div className="flex items-start gap-3">
+            <AlertCircle className="h-5 w-5 text-rose-600 mt-0.5" />
+            <div>
+              <div className="font-semibold text-rose-900">Erro ao carregar dados</div>
+              <div className="text-sm text-rose-700 mt-1">{error}</div>
+              {hint && <div className="text-xs text-rose-700 mt-2">💡 {hint}</div>}
+            </div>
           </div>
         </div>
       )}
 
-      {/* Stats Grid */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6">
-        <StatsCard
-          title="Total Clientes"
-          value={totalCount || 0}
-          icon={Users}
-          color="emerald"
-          trend={`${activeCount || 0} ativos`}
-        />
-        <StatsCard
-          title="Em Trial"
-          value={trialCount}
-          icon={Clock}
-          color="indigo"
-        />
-        <StatsCard
-          title="Expirados"
-          value={expiredCount}
-          icon={AlertCircle}
-          color="rose"
-        />
-        <StatsCard
-          title="Mensagens Hoje"
-          value={messagesToday || 0}
-          icon={MessageSquare}
-          color="blue"
-          trend="+12% vs ontem"
-        />
+      {/* Stats */}
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+        <StatsCard title="Total Clientes" value={totalCount} icon={Users} color="emerald" trend={`${activeCount} ativos`} />
+        <StatsCard title="Em Trial" value={trialCount} icon={Clock} color="indigo" />
+        <StatsCard title="Expirados" value={expiredCount} icon={AlertCircle} color="rose" />
+        <StatsCard title="Mensagens Hoje" value={messagesToday} icon={MessageSquare} color="blue" />
       </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
-        <div className="lg:col-span-2 space-y-8">
-          <section className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
-            <div className="p-6 border-b border-slate-100 flex items-center justify-between">
-              <h2 className="text-lg font-bold text-slate-900 flex items-center gap-2">
-                <AlertCircle className="h-5 w-5 text-amber-500" />
-                Alertas de Expiração (24h)
-              </h2>
-              <span className="px-2 py-1 bg-amber-50 text-amber-700 text-[10px] font-bold rounded-full uppercase">
-                {(expiringSoon?.length || 0)} Críticos
-              </span>
-            </div>
-
-            <div className="divide-y divide-slate-100">
-              {(expiringSoon || []).map((client: any, i: number) => (
-                <div key={i} className="p-4 flex items-center justify-between hover:bg-slate-50 transition">
-                  <div className="flex items-center gap-4">
-                    <div className="h-10 w-10 rounded-full bg-amber-100 flex items-center justify-center text-amber-700">
-                      <Clock className="h-5 w-5" />
-                    </div>
-                    <div>
-                      <p className="text-sm font-bold text-slate-900">{client.company_name || client.name}</p>
-                      <p className="text-xs text-slate-500">
-                        Expira em{' '}
-                        {new Date(client.trial_ends_at || client.trial_end).toLocaleTimeString('pt-PT', { hour: '2-digit', minute: '2-digit' })}
-                      </p>
-                    </div>
-                  </div>
-                  <Link
-                    href={`/app/clients/${client.id}`}
-                    className="text-xs font-bold text-indigo-600 hover:text-indigo-700 flex items-center gap-1"
-                  >
-                    Renovar <ChevronRight className="h-3 w-3" />
-                  </Link>
-                </div>
-              ))}
-
-              {(expiringSoon?.length || 0) === 0 && (
-                <div className="p-12 text-center text-slate-400 italic text-sm">
-                  Nenhum cliente expira nas próximas 24 horas.
-                </div>
-              )}
-            </div>
-          </section>
-
-          <section className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-            <Link
-              href="/app/clients"
-              className="bg-indigo-600 p-6 rounded-2xl text-white shadow-lg shadow-indigo-200 hover:bg-indigo-700 transition group"
-            >
-              <Plus className="h-8 w-8 mb-4 group-hover:scale-110 transition-transform" />
-              <h3 className="font-bold">Novo Cliente</h3>
-              <p className="text-indigo-100 text-xs mt-1">Adicionar empresa e bot</p>
-            </Link>
-
-            <Link
-              href="/app/messages"
-              className="bg-white p-6 rounded-2xl border border-slate-200 hover:border-indigo-300 transition group"
-            >
-              <MessageSquare className="h-8 w-8 mb-4 text-indigo-600 group-hover:scale-110 transition-transform" />
-              <h3 className="font-bold text-slate-900">Ver Mensagens</h3>
-              <p className="text-slate-500 text-xs mt-1">Histórico global</p>
-            </Link>
-
-            <Link
-              href="/app/settings"
-              className="bg-white p-6 rounded-2xl border border-slate-200 hover:border-indigo-300 transition group"
-            >
-              <Settings className="h-8 w-8 mb-4 text-slate-400 group-hover:scale-110 transition-transform" />
-              <h3 className="font-bold text-slate-900">Configurar APIs</h3>
-              <p className="text-slate-500 text-xs mt-1">Estado do sistema</p>
-            </Link>
-          </section>
+      {/* Expirações */}
+      <div className="rounded-2xl border bg-card overflow-hidden">
+        <div className="p-4 border-b flex items-center justify-between">
+          <div className="font-semibold flex items-center gap-2">
+            <AlertCircle className="h-4 w-4" />
+            Alertas de expiração (24h)
+          </div>
+          <div className="text-xs text-muted-foreground">{expiringSoon.length} críticos</div>
         </div>
 
-        <div className="space-y-8">
-          <section className="bg-slate-900 rounded-2xl p-8 text-white shadow-xl relative overflow-hidden">
-            <div className="absolute top-0 right-0 p-4 opacity-10">
-              <TrendingUp className="h-24 w-24" />
-            </div>
-            <h3 className="text-indigo-400 text-xs font-bold uppercase tracking-widest mb-6">Performance Hoje</h3>
-
-            <div className="space-y-6">
+        <div className="divide-y">
+          {expiringSoon.map((c: any, i: number) => (
+            <div key={i} className="p-4 flex items-center justify-between">
               <div>
-                <div className="flex justify-between text-xs mb-2">
-                  <span className="text-slate-400">Taxa de Resposta</span>
-                  <span className="font-bold">98%</span>
-                </div>
-                <div className="h-1.5 w-full bg-slate-800 rounded-full overflow-hidden">
-                  <div className="h-full w-[98%] bg-emerald-500 rounded-full shadow-[0_0_8px_rgba(16,185,129,0.5)]"></div>
+                <div className="font-medium">{c.company_name || c.name || `Cliente ${c.id}`}</div>
+                <div className="text-xs text-muted-foreground">
+                  Expira: {new Date(c.trial_ends_at || c.trial_end).toLocaleString('pt-PT')}
                 </div>
               </div>
-
-              <div>
-                <div className="flex justify-between text-xs mb-2">
-                  <span className="text-slate-400">Conversão Trial</span>
-                  <span className="font-bold">45%</span>
-                </div>
-                <div className="h-1.5 w-full bg-slate-800 rounded-full overflow-hidden">
-                  <div className="h-full w-[45%] bg-indigo-500 rounded-full shadow-[0_0_8px_rgba(99,102,241,0.5)]"></div>
-                </div>
-              </div>
+              <Link href={`/app/clients/${c.id}`} className="text-sm text-indigo-600 flex items-center gap-1">
+                Ver <ChevronRight className="h-4 w-4" />
+              </Link>
             </div>
+          ))}
 
-            <button className="w-full mt-8 py-3 bg-white/10 hover:bg-white/20 rounded-xl text-xs font-bold transition flex items-center justify-center gap-2">
-              Ver Relatório Completo <ArrowUpRight className="h-3 w-3" />
-            </button>
-          </section>
-
-          <section className="bg-white rounded-2xl border border-slate-200 p-6 shadow-sm">
-            <h3 className="text-slate-900 font-bold mb-4">Dica do Dia</h3>
-            <div className="flex gap-4">
-              <div className="h-10 w-10 shrink-0 rounded-full bg-indigo-50 flex items-center justify-center text-indigo-600">
-                <Zap className="h-5 w-5" />
-              </div>
-              <p className="text-xs text-slate-500 leading-relaxed">
-                Bots com prompts que incluem o horário de funcionamento da empresa têm 30% menos intervenção humana necessária.
-              </p>
-            </div>
-          </section>
+          {expiringSoon.length === 0 && (
+            <div className="p-6 text-sm text-muted-foreground">Nenhum cliente expira nas próximas 24 horas.</div>
+          )}
         </div>
       </div>
 
-      {/* Debug */}
+      {/* Ações */}
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+        <Link href="/app/clients" className="rounded-2xl border bg-card p-4 flex items-center gap-3">
+          <Plus className="h-5 w-5" />
+          <div>
+            <div className="font-medium">Novo Cliente</div>
+            <div className="text-xs text-muted-foreground">Adicionar empresa e bot</div>
+          </div>
+        </Link>
+
+        <Link href="/app/messages" className="rounded-2xl border bg-card p-4 flex items-center gap-3">
+          <MessageSquare className="h-5 w-5" />
+          <div>
+            <div className="font-medium">Mensagens</div>
+            <div className="text-xs text-muted-foreground">Histórico global</div>
+          </div>
+        </Link>
+
+        <Link href="/app/settings" className="rounded-2xl border bg-card p-4 flex items-center gap-3">
+          <Settings className="h-5 w-5" />
+          <div>
+            <div className="font-medium">Configurações</div>
+            <div className="text-xs text-muted-foreground">APIs e sistema</div>
+          </div>
+        </Link>
+      </div>
+
       <DebugPanel
         title="Debug Dashboard"
         endpoint={endpoint}
