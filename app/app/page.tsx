@@ -14,13 +14,12 @@ import {
 import Link from 'next/link';
 import { StatsCard } from '@/components/stats-card';
 import DebugPanel from '@/components/debug-panel';
-import { getBaseUrl } from '@/lib/baseUrl';
 
 export const dynamic = 'force-dynamic';
 
 export default async function DashboardPage() {
-  const baseUrl = getBaseUrl();
-  const endpoint = `${baseUrl}/api/admin/stats`;
+  // ✅ NUNCA MAIS depende de baseUrl/env/domínio
+  const endpoint = `/api/admin/stats`;
 
   let stats = {
     totalCount: 0,
@@ -28,41 +27,51 @@ export default async function DashboardPage() {
     trialCount: 0,
     expiredCount: 0,
     messagesToday: 0,
-    expiringSoon: [],
+    expiringSoon: [] as any[],
   };
 
   let error: string | null = null;
-  let hint: string | null = null;
+  let hint: string | undefined = undefined;
 
   try {
     const res = await fetch(endpoint, {
       cache: 'no-store',
       headers: {
+        // permite stats sem sessão (server-to-server)
         'x-tratatudo-key': process.env.TRATATUDO_API_KEY || '',
       },
     });
 
-    const data = await res.json();
+    const contentType = res.headers.get('content-type') || '';
+    const raw = await res.text();
 
-    if (!res.ok || !data.ok) {
-      error = data.error || 'Erro ao carregar estatísticas';
-      hint = data.hint || 'Verifica permissões ou variáveis de ambiente.';
+    const looksLikeHtml =
+      raw.trim().startsWith('<!doctype') ||
+      raw.trim().startsWith('<html') ||
+      raw.trim().startsWith('<') ||
+      raw.toLowerCase().includes('the deploy');
+
+    if (looksLikeHtml || !contentType.includes('application/json')) {
+      error = `Resposta inválida do servidor (não é JSON).`;
+      hint =
+        `Isto acontece quando o endpoint devolve HTML/texto (deploy/erro) ou quando estás a bater num domínio errado. ` +
+        `Confirma que estás em https://trata-tudo-dashbord.vercel.app.`;
     } else {
-      stats = data.data || stats;
+      const data = JSON.parse(raw);
+
+      if (res.ok && data.ok) {
+        stats = data.data || stats;
+      } else {
+        error = data.error || 'Erro ao carregar estatísticas';
+        hint = data.hint || 'Verifica logs do servidor.';
+      }
     }
   } catch (err: any) {
-    error = err.message || 'Erro crítico durante renderização.';
-    hint = 'Verifica logs do servidor.';
+    error = err?.message || 'Erro crítico durante a renderização.';
+    hint = 'Verifica os logs do servidor.';
   }
 
-  const {
-    totalCount,
-    activeCount,
-    trialCount,
-    expiredCount,
-    messagesToday,
-    expiringSoon,
-  } = stats;
+  const { totalCount, activeCount, trialCount, expiredCount, messagesToday, expiringSoon } = stats;
 
   return (
     <div className="space-y-8">
@@ -97,28 +106,13 @@ export default async function DashboardPage() {
           color="emerald"
           trend={`${activeCount || 0} ativos`}
         />
-        <StatsCard
-          title="Em Trial"
-          value={trialCount || 0}
-          icon={Clock}
-          color="indigo"
-        />
-        <StatsCard
-          title="Expirados"
-          value={expiredCount || 0}
-          icon={AlertCircle}
-          color="rose"
-        />
-        <StatsCard
-          title="Mensagens Hoje"
-          value={messagesToday || 0}
-          icon={MessageSquare}
-          color="blue"
-        />
+        <StatsCard title="Em Trial" value={trialCount || 0} icon={Clock} color="indigo" />
+        <StatsCard title="Expirados" value={expiredCount || 0} icon={AlertCircle} color="rose" />
+        <StatsCard title="Mensagens Hoje" value={messagesToday || 0} icon={MessageSquare} color="blue" />
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
-        {/* Alertas */}
+        {/* Main Content: Alerts */}
         <div className="lg:col-span-2 space-y-8">
           <section className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
             <div className="p-6 border-b border-slate-100 flex items-center justify-between">
@@ -133,10 +127,7 @@ export default async function DashboardPage() {
 
             <div className="divide-y divide-slate-100">
               {expiringSoon.map((client: any, i: number) => (
-                <div
-                  key={i}
-                  className="p-4 flex items-center justify-between hover:bg-slate-50 transition"
-                >
+                <div key={i} className="p-4 flex items-center justify-between hover:bg-slate-50 transition">
                   <div className="flex items-center gap-4">
                     <div className="h-10 w-10 rounded-full bg-amber-100 flex items-center justify-center text-amber-700">
                       <Clock className="h-5 w-5" />
@@ -145,13 +136,15 @@ export default async function DashboardPage() {
                       <p className="text-sm font-bold text-slate-900">
                         {client.company_name || `Cliente ${client.id}`}
                       </p>
-                      <p className="text-xs text-slate-500">
-                        Expira em{' '}
-                        {new Date(client.trial_end).toLocaleTimeString(
-                          'pt-PT',
-                          { hour: '2-digit', minute: '2-digit' }
-                        )}
-                      </p>
+                      {client.trial_end && (
+                        <p className="text-xs text-slate-500">
+                          Expira em{' '}
+                          {new Date(client.trial_end).toLocaleTimeString('pt-PT', {
+                            hour: '2-digit',
+                            minute: '2-digit',
+                          })}
+                        </p>
+                      )}
                     </div>
                   </div>
 
@@ -171,11 +164,45 @@ export default async function DashboardPage() {
               )}
             </div>
           </section>
+
+          {/* Ações Rápidas */}
+          <section className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+            <Link
+              href="/app/clients"
+              className="bg-indigo-600 p-6 rounded-2xl text-white shadow-lg shadow-indigo-200 hover:bg-indigo-700 transition group"
+            >
+              <Plus className="h-8 w-8 mb-4 group-hover:scale-110 transition-transform" />
+              <h3 className="font-bold">Novo Cliente</h3>
+              <p className="text-indigo-100 text-xs mt-1">Adicionar empresa e bot</p>
+            </Link>
+
+            <Link
+              href="/app/messages"
+              className="bg-white p-6 rounded-2xl border border-slate-200 hover:border-indigo-300 transition group"
+            >
+              <MessageSquare className="h-8 w-8 mb-4 text-indigo-600 group-hover:scale-110 transition-transform" />
+              <h3 className="font-bold text-slate-900">Ver Mensagens</h3>
+              <p className="text-slate-500 text-xs mt-1">Histórico global</p>
+            </Link>
+
+            <Link
+              href="/app/settings"
+              className="bg-white p-6 rounded-2xl border border-slate-200 hover:border-indigo-300 transition group"
+            >
+              <Settings className="h-8 w-8 mb-4 text-slate-400 group-hover:scale-110 transition-transform" />
+              <h3 className="font-bold text-slate-900">Configurar APIs</h3>
+              <p className="text-slate-500 text-xs mt-1">Estado do sistema</p>
+            </Link>
+          </section>
         </div>
 
         {/* Sidebar */}
         <div className="space-y-8">
-          <section className="bg-slate-900 rounded-2xl p-8 text-white shadow-xl">
+          <section className="bg-slate-900 rounded-2xl p-8 text-white shadow-xl relative overflow-hidden">
+            <div className="absolute top-0 right-0 p-4 opacity-10">
+              <TrendingUp className="h-24 w-24" />
+            </div>
+
             <h3 className="text-indigo-400 text-xs font-bold uppercase tracking-widest mb-6">
               Performance Hoje
             </h3>
@@ -206,16 +233,22 @@ export default async function DashboardPage() {
               Ver Relatório Completo <ArrowUpRight className="h-3 w-3" />
             </button>
           </section>
+
+          <section className="bg-white rounded-2xl border border-slate-200 p-6 shadow-sm">
+            <h3 className="text-slate-900 font-bold mb-4">Dica do Dia</h3>
+            <div className="flex gap-4">
+              <div className="h-10 w-10 shrink-0 rounded-full bg-indigo-50 flex items-center justify-center text-indigo-600">
+                <Zap className="h-5 w-5" />
+              </div>
+              <p className="text-xs text-slate-500 leading-relaxed">
+                Bots com prompts que incluem o horário de funcionamento da empresa têm menos intervenção humana necessária.
+              </p>
+            </div>
+          </section>
         </div>
       </div>
 
-      <DebugPanel
-        title="Debug Dashboard"
-        endpoint={endpoint}
-        error={error || undefined}
-        hint={hint || undefined}
-        data={stats}
-      />
+      <DebugPanel title="Debug Dashboard" endpoint={endpoint} error={error || undefined} hint={hint} data={stats} />
     </div>
   );
 }
