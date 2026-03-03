@@ -1,156 +1,182 @@
-import { createAdminClient } from '@/lib/supabase/admin';
-import { NextResponse } from 'next/server';
-import { normalizeE164 } from '@/lib/phone';
-import { getBaseUrl } from '@/lib/baseUrl';
+import { NextResponse } from "next/server";
+import { createClient as createSbAdmin } from "@supabase/supabase-js";
 
-export async function POST(request: Request) {
-  try {
-    const body = await request.json();
-    console.log('Evolution Webhook Received:', JSON.stringify(body, null, 2));
-
-    // Evolution API sends different types of events. We care about messages.upsert
-    if (body.event !== 'messages.upsert') {
-      return NextResponse.json({ ok: true, message: 'Ignored event type' });
-    }
-
-    const message = body.data?.message;
-    if (!message || message.fromMe) {
-      return NextResponse.json({ ok: true, message: 'Ignored self message or empty' });
-    }
-
-    const instanceName = body.instance;
-    const rawSenderPhone = body.data.key.remoteJid.split('@')[0]; // User's phone
-    const text = message.conversation || message.extendedTextMessage?.text || '';
-
-    if (!text) return NextResponse.json({ ok: true, message: 'No text content' });
-
-    const senderPhone = normalizeE164(rawSenderPhone) || ('+' + rawSenderPhone.replace(/\D/g, ''));
-    console.log(`[Webhook] Instance: ${instanceName} | Sender: ${senderPhone}`);
-
-    const supabase = createAdminClient();
-    let client: any = null;
-    const hubInstanceName = process.env.HUB_INSTANCE_NAME || 'HUB';
-
-    if (instanceName === hubInstanceName) {
-      const { data: hubClient } = await supabase
-        .from('clients')
-        .select('*')
-        .eq('phone_e164', senderPhone)
-        .single();
-
-      if (hubClient) {
-        console.log(`[HUB] Client found: ${hubClient.company_name} (${hubClient.status})`);
-        const now = new Date();
-        const trialEnd = hubClient.trial_end ? new Date(hubClient.trial_end) : null;
-        const isTrialValid = hubClient.status === 'trial' && trialEnd && trialEnd > now;
-        const isActive = hubClient.status === 'active';
-
-        if (isActive || isTrialValid) {
-          client = hubClient;
-        } else {
-          console.log(`[HUB] Client ${senderPhone} expired or inactive.`);
-          await sendEvolutionMessage(instanceName, senderPhone, "Número não reconhecido ou teste expirado...");
-          return NextResponse.json({ ok: true, message: 'Expired/Inactive' });
-        }
-      } else {
-        console.log(`[HUB] Client NOT found for phone: ${senderPhone}`);
-        await sendEvolutionMessage(instanceName, senderPhone, "Número não reconhecido ou teste expirado...");
-        return NextResponse.json({ ok: true, message: 'Not found' });
-      }
-    } else {
-      // Production instance logic: identify by production_instance_name
-      let { data: prodClient } = await supabase
-        .from('clients')
-        .select('*')
-        .eq('production_instance_name', instanceName)
-        .single();
-
-      // Fallback to instance_name if production_instance_name not found
-      if (!prodClient) {
-        let { data: dedicatedClient } = await supabase
-          .from('clients')
-          .select('*')
-          .eq('instance_name', instanceName)
-          .single();
-        prodClient = dedicatedClient;
-      }
-
-      client = prodClient;
-    }
-
-    if (!client) {
-      console.error(`Client not found for instance: ${instanceName}`);
-      return NextResponse.json({ error: 'Client not found' }, { status: 404 });
-    }
-
-    // Log incoming message
-    await supabase.from('messages').insert({
-      phone: senderPhone,
-      instance_name: instanceName,
-      direction: 'in',
-      text: text,
-      created_at: new Date().toISOString()
-    });
-
-    // Call Groq for AI response
-    const baseUrl = getBaseUrl();
-    const groqRes = await fetch(`${baseUrl}/api/groq/chat`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        message: text,
-        systemPrompt: client.bot_instructions || client.system_prompt || '',
-        phone: senderPhone
-      })
-    });
-
-    if (!groqRes.ok) throw new Error('Erro ao chamar Groq');
-    const groqData = await groqRes.json();
-    const aiResponse = groqData.text;
-
-    // Send response back via Evolution
-    await sendEvolutionMessage(instanceName, senderPhone, aiResponse);
-
-    // Log outgoing message
-    await supabase.from('messages').insert({
-      phone: senderPhone,
-      instance_name: instanceName,
-      direction: 'out',
-      text: aiResponse,
-      created_at: new Date().toISOString()
-    });
-
-    return NextResponse.json({ ok: true });
-
-  } catch (error: any) {
-    console.error('Webhook Error:', error);
-    return NextResponse.json({ error: error.message }, { status: 500 });
-  }
+function getSupabaseAdmin() {
+  const url = process.env.NEXT_PUBLIC_SUPABASE_URL!;
+  const key = process.env.SUPABASE_SERVICE_ROLE_KEY!;
+  if (!url || !key) throw new Error("Missing Supabase env vars");
+  return createSbAdmin(url, key, { auth: { persistSession: false } });
 }
 
-async function sendEvolutionMessage(instanceName: string, number: string, text: string) {
-  const evoUrl = process.env.EVOLUTION_API_URL;
-  const evoKey = process.env.EVOLUTION_API_KEY;
+function cleanText(s: any) {
+  return String(s || "").replace(/\s+/g, " ").trim();
+}
 
-  if (!evoUrl || !evoKey) {
-    console.error('Evolution API credentials missing');
-    return;
+function jidToNumber(jid: string) {
+  // "3519xxxxxxx@s.whatsapp.net" -> "3519xxxxxxx"
+  if (!jid) return "";
+  const m = jid.match(/^(\d+)@/);
+  return m ? m[1] : jid.replace(/\D/g, "");
+}
+
+function normalizeNumberDigits(n: string) {
+  // Evolution aceita com ou sem +, mas mais seguro mandar só dígitos
+  return String(n || "").replace(/\D/g, "");
+}
+
+function pickFirstString(...vals: any[]) {
+  for (const v of vals) {
+    if (typeof v === "string" && v.trim()) return v.trim();
   }
+  return "";
+}
 
+/**
+ * Webhook handler (Evolution API)
+ * - identifica instance_name
+ * - identifica phone_e164 (remetente)
+ * - identifica texto recebido
+ * - resolve client_id pela instância ativa (public.client_instances)
+ * - chama /api/bot/reply (motor com estado)
+ * - envia reply via Evolution /message/sendText/{instance}
+ */
+export async function POST(req: Request) {
   try {
-    await fetch(`${evoUrl}/message/sendText/${instanceName}`, {
-      method: 'POST',
+    const supabase = getSupabaseAdmin();
+
+    const payload = await req.json().catch(() => ({}));
+
+    // ⚠️ Evolution envia formatos diferentes conforme connector/evento.
+    // Vamos tentar apanhar instance de vários sítios:
+    const instanceName = pickFirstString(
+      payload?.instance,
+      payload?.instanceName,
+      payload?.data?.instance,
+      payload?.data?.instanceName,
+      payload?.body?.instance,
+      payload?.body?.instanceName,
+      payload?.qrcode?.instance
+    );
+
+    // Texto da mensagem (vários formatos possíveis)
+    const text = cleanText(
+      pickFirstString(
+        payload?.data?.message?.conversation,
+        payload?.data?.message?.extendedTextMessage?.text,
+        payload?.data?.message?.text,
+        payload?.message?.conversation,
+        payload?.message?.extendedTextMessage?.text,
+        payload?.text,
+        payload?.data?.text
+      )
+    );
+
+    // Remetente (JID ou número)
+    const remoteJid = pickFirstString(
+      payload?.data?.key?.remoteJid,
+      payload?.key?.remoteJid,
+      payload?.data?.remoteJid,
+      payload?.remoteJid,
+      payload?.data?.from,
+      payload?.from
+    );
+
+    const fromNumber = normalizeNumberDigits(
+      pickFirstString(
+        payload?.data?.number,
+        payload?.number,
+        payload?.data?.sender,
+        payload?.sender,
+        jidToNumber(remoteJid)
+      )
+    );
+
+    // ignorar eventos sem mensagem de texto
+    if (!instanceName || !fromNumber || !text) {
+      return NextResponse.json({ ok: true, ignored: true });
+    }
+
+    // 1) resolver client_id pela instância ativa
+    const { data: ci, error: ciErr } = await supabase
+      .from("client_instances")
+      .select("client_id, instance_name, status")
+      .eq("instance_name", instanceName)
+      .eq("status", "active")
+      .maybeSingle();
+
+    if (ciErr) throw ciErr;
+    if (!ci?.client_id) {
+      // se não encontrou cliente para a instância, não envia nada
+      return NextResponse.json({ ok: true, ignored: true, reason: "unknown_instance" });
+    }
+
+    const client_id = Number(ci.client_id);
+
+    // 2) chamar o motor do bot (estado + flows)
+    const origin = new URL(req.url).origin;
+    const botRes = await fetch(`${origin}/api/bot/reply`, {
+      method: "POST",
       headers: {
-        'Content-Type': 'application/json',
-        'apikey': evoKey
+        "Content-Type": "application/json",
+        // o bot/reply está protegido por ADMIN_API_KEY (X-TrataTudo-Key)
+        "X-TrataTudo-Key": process.env.ADMIN_API_KEY || "",
       },
       body: JSON.stringify({
-        number: number.replace('+', ''),
-        text: text,
-        delay: 1000
-      })
+        client_id,
+        phone_e164: `+${fromNumber}`, // guardamos com +
+        text,
+        channel: "whatsapp",
+        instance_name: instanceName,
+      }),
     });
-  } catch (error) {
-    console.error('Error sending Evolution message:', error);
+
+    const botJson = await botRes.json().catch(() => ({}));
+    const reply = cleanText(botJson?.reply);
+
+    if (!reply) {
+      return NextResponse.json({ ok: true, ignored: true, reason: "no_reply" });
+    }
+
+    // 3) enviar reply via Evolution
+    const evoBase = (process.env.EVOLUTION_API_URL || "").replace(/\/+$/, "");
+    const evoKey = process.env.EVOLUTION_API_KEY || "";
+
+    if (!evoBase || !evoKey) {
+      // sem config de Evolution no Vercel, não dá para enviar
+      return NextResponse.json({ ok: false, error: "Missing EVOLUTION_API_URL/EVOLUTION_API_KEY" }, { status: 500 });
+    }
+
+    // endpoint padrão Evolution v2: POST /message/sendText/{instance}
+    const sendUrl = `${evoBase}/message/sendText/${encodeURIComponent(instanceName)}`;
+
+    const sendRes = await fetch(sendUrl, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        // header usado na doc: apikey
+        apikey: evoKey,
+      } as any,
+      body: JSON.stringify({
+        number: fromNumber,
+        text: reply,
+      }),
+    });
+
+    // não bloqueia a UX se o Evolution falhar, mas devolve info
+    const sendOk = sendRes.ok;
+    const sendBody = await sendRes.text().catch(() => "");
+
+    return NextResponse.json({
+      ok: true,
+      client_id,
+      instance: instanceName,
+      from: fromNumber,
+      sent: sendOk,
+      evolution_status: sendRes.status,
+      evolution_body: sendBody ? sendBody.slice(0, 500) : "",
+    });
+  } catch (e: any) {
+    console.error("EVOLUTION WEBHOOK ERROR:", e);
+    return NextResponse.json({ ok: false, error: e.message }, { status: 500 });
   }
 }
