@@ -3,16 +3,9 @@
 import { useState, useEffect } from 'react';
 import {
   Calendar,
-  Phone,
-  Building2,
   Bot,
-  History,
   Save,
   Loader2,
-  Zap,
-  ShieldCheck,
-  FileText,
-  Clock,
   Sparkles,
   Send,
   Copy,
@@ -22,8 +15,9 @@ import {
   ChevronLeft,
   ChevronRight,
   MessageSquare,
-  Terminal,
   AlertCircle,
+  Clock,
+  ShieldCheck,
   Smartphone,
 } from 'lucide-react';
 import { useRouter } from 'next/navigation';
@@ -32,107 +26,103 @@ import { normalizeE164 } from '@/lib/phone';
 import { DebugPanel } from '@/components/debug-panel';
 import { ProductionInstanceModal } from '@/components/clients/production-instance-modal';
 
-export default function ClientDetailsPage({
-  params,
-}: {
-  params: { id: string };
-}) {
+type SavedFeedback = 'data' | 'prompt' | null;
+
+function toISODateOnly(d: Date) {
+  return d.toISOString().split('T')[0];
+}
+
+function addDays(date: Date, days: number) {
+  const d = new Date(date);
+  d.setDate(d.getDate() + days);
+  return d;
+}
+
+function safeSplitDate(v: any) {
+  if (!v) return '';
+  try {
+    const s = String(v);
+    return s.includes('T') ? s.split('T')[0] : s;
+  } catch {
+    return '';
+  }
+}
+
+function daysBetween(a: Date, b: Date) {
+  const ms = b.getTime() - a.getTime();
+  return Math.ceil(ms / (1000 * 60 * 60 * 24));
+}
+
+export default function ClientDetailsPage({ params }: { params: { id: string } }) {
+  const router = useRouter();
+
   const [client, setClient] = useState<any>(null);
   const [recentMessages, setRecentMessages] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
-  const [savedFeedback, setSavedFeedback] = useState<'data' | 'prompt' | null>(null);
+  const [savedFeedback, setSavedFeedback] = useState<SavedFeedback>(null);
+
   const [generatingPrompt, setGeneratingPrompt] = useState(false);
   const [sendingTest, setSendingTest] = useState(false);
   const [subscribing, setSubscribing] = useState(false);
+
   const [testResult, setTestResult] = useState<{ success: boolean; message: string; log?: any } | null>(null);
-  const [error, setError] = useState<any>(null);
+
+  const [error, setError] = useState<string | null>(null);
   const [hint, setHint] = useState<string | undefined>(undefined);
+
   const [isProductionModalOpen, setIsProductionModalOpen] = useState(false);
 
+  // endpoint principal
   const endpoint = `/api/admin/clients/${params.id}`;
-
-  // 🔐 (opcional) key pública para chamar endpoints protegidos por ADMIN_API_KEY
-  // Se não definires NEXT_PUBLIC_ADMIN_API_KEY no Vercel, o botão "Migrar para Produção" vai dar 401.
-  const adminKey =
-    (typeof process !== 'undefined' && (process as any)?.env?.NEXT_PUBLIC_ADMIN_API_KEY) || '';
-
-  const handleSubscribe = async () => {
-    if (!confirm('Deseja ativar o plano para este cliente? Isto criará uma instância dedicada.')) return;
-    setSubscribing(true);
-    try {
-      const res = await fetch('/api/admin/subscribe', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ client_id: params.id }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Erro ao ativar plano');
-      alert(`Plano ativado! Instância: ${data.instance_name}`);
-      window.location.reload();
-    } catch (error: any) {
-      alert(error.message);
-    } finally {
-      setSubscribing(false);
-    }
-  };
-
-  // ✅ NOVO: Migrar para Produção (cria/ativa client-<id> + status active + grava production_instance_name)
-  const handleMigrateToProduction = async () => {
-    if (
-      !confirm(
-        'Migrar para Produção?\n\nIsto vai criar/ativar uma instância dedicada client-<id> e mudar o cliente para status ACTIVE.'
-      )
-    )
-      return;
-
-    setSubscribing(true);
-    try {
-      const res = await fetch('/api/evolution/instances/migrate-to-production', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          ...(adminKey ? { 'X-TrataTudo-Key': adminKey } : {}),
-        },
-        body: JSON.stringify({ client_id: Number(params.id) }),
-      });
-
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok || !data.ok) throw new Error(data.error || 'Erro ao migrar para produção');
-
-      alert(`✅ Migrado para produção!\nInstância: ${data.instance_name}`);
-      await fetchData(); // atualiza a página sem reload
-    } catch (error: any) {
-      alert(error.message);
-    } finally {
-      setSubscribing(false);
-    }
-  };
 
   // Form states
   const [companyName, setCompanyName] = useState('');
   const [phoneE164, setPhoneE164] = useState('');
   const [instanceName, setInstanceName] = useState('');
   const [productionInstanceName, setProductionInstanceName] = useState('');
-  const [status, setStatus] = useState('');
-  const [trialEnd, setTrialEnd] = useState('');
+  const [status, setStatus] = useState<'trial' | 'active' | 'expired' | string>('trial');
+  const [trialEnd, setTrialEnd] = useState(''); // usado como validade do serviço
   const [botInstructions, setBotInstructions] = useState('');
   const [forcePTPT, setForcePTPT] = useState(false);
   const [mapsUrl, setMapsUrl] = useState('');
+
+  // Teste WhatsApp
   const [testPhone, setTestPhone] = useState('');
   const [testMessage, setTestMessage] = useState('Olá! Esta é uma mensagem de teste do TrataTudo.');
 
-  // Pagination
+  // Paginação mensagens do cliente
   const [msgPage, setMsgPage] = useState(1);
   const pageSize = 50;
 
-  const router = useRouter();
+  const fetchMessages = async (phone: string) => {
+    if (!phone) return;
+    try {
+      const res = await fetch(`/api/messages?phone=${encodeURIComponent(phone)}&page=${msgPage}&limit=${pageSize}`);
+      const text = await res.text();
+      try {
+        const data = JSON.parse(text);
+        if (res.ok && data.ok) {
+          const payload = data.data || {};
+          setRecentMessages(payload.messages || []);
+        }
+      } catch (e) {
+        console.error('Failed to parse messages JSON in client details:', e, 'Raw text:', text);
+      }
+    } catch (err) {
+      console.error('Error fetching messages:', err);
+    }
+  };
 
   const fetchData = async () => {
     setLoading(true);
+    setError(null);
+    setHint(undefined);
+
     try {
       const res = await fetch(endpoint);
       const text = await res.text();
+
       let json: any = {};
       try {
         json = JSON.parse(text);
@@ -152,30 +142,31 @@ export default function ClientDetailsPage({
         setCompanyName(clientData.company_name || clientData.name || '');
         setPhoneE164(clientData.phone_e164 || clientData.phone || '');
 
-        // ✅ estas colunas já existem no supabase (instance_name / production_instance_name)
         setInstanceName(clientData.instance_name || '');
         setProductionInstanceName(clientData.production_instance_name || '');
 
         setStatus(clientData.status || 'trial');
 
         const tEnd = clientData.trial_end || clientData.trial_ends_at || clientData.trial_end_at;
-        setTrialEnd(tEnd ? tEnd.split('T')[0] : '');
+        setTrialEnd(safeSplitDate(tEnd));
 
         const instructions = clientData.bot_instructions || clientData.system_prompt || '';
         setBotInstructions(instructions);
 
         setTestPhone(clientData.phone_e164 || clientData.phone || '');
 
-        // Check if "Responde sempre em Português de Portugal." is in the prompt
+        // Forçar PT-PT
         if (instructions.includes('Responde sempre em Português de Portugal.')) {
           setForcePTPT(true);
+        } else {
+          setForcePTPT(false);
         }
 
         fetchMessages(clientData.phone_e164 || clientData.phone);
       }
     } catch (err: any) {
       console.error('Error fetching client details:', err);
-      setError(err.message);
+      setError(err.message || 'Erro ao carregar cliente');
       setHint('Verifique se o ID do cliente é válido e se a tabela "clients" existe.');
     } finally {
       setLoading(false);
@@ -186,25 +177,6 @@ export default function ClientDetailsPage({
     fetchData();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [params.id]);
-
-  const fetchMessages = async (phone: string) => {
-    if (!phone) return;
-    try {
-      const res = await fetch(`/api/messages?phone=${phone}&page=${msgPage}&limit=${pageSize}`);
-      const text = await res.text();
-      try {
-        const data = JSON.parse(text);
-        if (res.ok && data.ok) {
-          const payload = data.data || {};
-          setRecentMessages(payload.messages || []);
-        }
-      } catch (e) {
-        console.error('Failed to parse messages JSON in client details:', e);
-      }
-    } catch (err) {
-      console.error('Error fetching messages:', err);
-    }
-  };
 
   useEffect(() => {
     if (client) {
@@ -217,9 +189,7 @@ export default function ClientDetailsPage({
     setSaving(true);
     try {
       const normalizedPhone = normalizeE164(phoneE164);
-      if (!normalizedPhone) {
-        throw new Error('Formato de telefone inválido.');
-      }
+      if (!normalizedPhone) throw new Error('Formato de telefone inválido.');
 
       const updates: any = {
         company_name: companyName,
@@ -237,14 +207,21 @@ export default function ClientDetailsPage({
         body: JSON.stringify(updates),
       });
 
-      if (!res.ok) throw new Error('Erro ao salvar dados');
+      const t = await res.text();
+      let j: any = {};
+      try {
+        j = JSON.parse(t);
+      } catch {
+        j = { ok: false, error: t?.slice(0, 200) };
+      }
+
+      if (!res.ok || !j.ok) throw new Error(j.error || 'Erro ao salvar dados');
 
       await fetchData();
-
       setSavedFeedback('data');
-      setTimeout(() => setSavedFeedback(null), 3000);
-    } catch (error: any) {
-      alert(error.message);
+      setTimeout(() => setSavedFeedback(null), 2500);
+    } catch (e: any) {
+      alert(e.message);
     } finally {
       setSaving(false);
     }
@@ -255,12 +232,8 @@ export default function ClientDetailsPage({
     try {
       let finalPrompt = botInstructions;
       const ptSuffix = '\n\nResponde sempre em Português de Portugal.';
-
-      if (forcePTPT && !finalPrompt.includes(ptSuffix)) {
-        finalPrompt += ptSuffix;
-      } else if (!forcePTPT && finalPrompt.includes(ptSuffix)) {
-        finalPrompt = finalPrompt.replace(ptSuffix, '');
-      }
+      if (forcePTPT && !finalPrompt.includes(ptSuffix)) finalPrompt += ptSuffix;
+      if (!forcePTPT && finalPrompt.includes(ptSuffix)) finalPrompt = finalPrompt.replace(ptSuffix, '');
 
       const res = await fetch('/api/clients/update', {
         method: 'POST',
@@ -272,68 +245,110 @@ export default function ClientDetailsPage({
         }),
       });
 
-      if (!res.ok) throw new Error('Erro ao salvar prompt');
-      const data = await res.json();
-      if (!data.ok) throw new Error(data.error || 'Erro ao salvar prompt');
+      const t = await res.text();
+      let j: any = {};
+      try {
+        j = JSON.parse(t);
+      } catch {
+        j = { ok: false, error: t?.slice(0, 200) };
+      }
+
+      if (!res.ok || !j.ok) throw new Error(j.error || 'Erro ao salvar prompt');
 
       await fetchData();
-
       setSavedFeedback('prompt');
-      setTimeout(() => setSavedFeedback(null), 3000);
-    } catch (error: any) {
-      alert(error.message);
+      setTimeout(() => setSavedFeedback(null), 2500);
+    } catch (e: any) {
+      alert(e.message);
     } finally {
       setSaving(false);
     }
   };
 
-  const handleRenew3Days = async () => {
-    const d = new Date();
-    d.setDate(d.getDate() + 3);
-    setTrialEnd(d.toISOString().split('T')[0]);
-    setStatus('trial');
-    alert('Data de expiração alterada para daqui a 3 dias.\nClique em "Guardar Dados" para confirmar.');
+  // 🔥 NOVO: Ativar/renovar +30 dias (usa trial_end como validade)
+  const handleActivate30Days = async () => {
+    const d = addDays(new Date(), 30);
+    setTrialEnd(toISODateOnly(d));
+    setStatus('active');
+    alert('✅ Ativo por +30 dias.\nAgora clica em "Guardar Dados" para confirmar.');
+  };
+
+  const handleRenew30Days = async () => {
+    // se já tiver trialEnd válido e ainda no futuro, renova a partir de lá; senão a partir de hoje
+    const now = new Date();
+    let base = now;
+
+    if (trialEnd) {
+      const currentEnd = new Date(trialEnd);
+      if (!isNaN(currentEnd.getTime()) && currentEnd.getTime() > now.getTime()) {
+        base = currentEnd;
+      }
+    }
+
+    const next = addDays(base, 30);
+    setTrialEnd(toISODateOnly(next));
+    setStatus('active');
+    alert('✅ Renovado +30 dias.\nAgora clica em "Guardar Dados" para confirmar.');
+  };
+
+  const handleBlockNow = async () => {
+    if (!confirm('Bloquear este cliente agora? (status = expired)')) return;
+    setStatus('expired');
+    alert('⚠️ Cliente marcado como expirado.\nAgora clica em "Guardar Dados" para confirmar.');
   };
 
   const handleGeneratePrompt = async () => {
-    if (!mapsUrl) return alert('Insira o link do Google Maps.');
+    if (!mapsUrl) return alert('Insere um link do Google Maps.');
+
     setGeneratingPrompt(true);
-
     try {
-      const resolveRes = await fetch('/api/places/resolve', {
+      // Preferência: usar o teu endpoint /api/places/lookup (já tens) + /api/bot/draft
+      const lookupRes = await fetch('/api/places/lookup', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ input: mapsUrl }),
+        body: JSON.stringify({ client_id: Number(params.id), maps_url: mapsUrl }),
       });
 
-      const details = await resolveRes.json();
-
-      if (!resolveRes.ok) {
-        console.error('Resolve Logs:', details.logs);
-        const lastLog = details.logs?.[details.logs.length - 1] || 'unknown_error';
-        throw new Error(`${details.error || 'Erro ao resolver local'} (resolve_failed: ${lastLog})`);
+      const lookupText = await lookupRes.text();
+      let lookup: any = {};
+      try {
+        lookup = JSON.parse(lookupText);
+      } catch {
+        lookup = { ok: false, error: lookupText?.slice(0, 200) };
       }
+      if (!lookupRes.ok || !lookup.ok) throw new Error(lookup.error || 'Falha ao analisar o Google Maps.');
 
-      const promptRes = await fetch('/api/groq/generate-prompt', {
+      // gerar prompt (não grava ainda)
+      const draftRes = await fetch('/api/bot/draft', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(details),
+        body: JSON.stringify({ client_id: Number(params.id) }),
       });
 
-      const promptData = await promptRes.json();
-      if (!promptRes.ok) throw new Error(promptData.error);
+      const draftText = await draftRes.text();
+      let draft: any = {};
+      try {
+        draft = JSON.parse(draftText);
+      } catch {
+        draft = { ok: false, error: draftText?.slice(0, 200) };
+      }
+      if (!draftRes.ok || !draft.ok) throw new Error(draft.error || 'Falha ao gerar prompt.');
 
-      setBotInstructions(promptData.prompt);
-      alert('Prompt gerado com sucesso! Reveja e clique em "Guardar Prompt".');
-    } catch (error: any) {
-      alert('Erro: ' + error.message);
+      const prompt = draft?.data?.draft_prompt || '';
+      if (!prompt) throw new Error('Prompt vazio.');
+
+      setBotInstructions(prompt);
+      alert('✅ Prompt gerado! Revê e clica em "Guardar Prompt".');
+    } catch (e: any) {
+      alert('Erro: ' + e.message);
     } finally {
       setGeneratingPrompt(false);
     }
   };
 
   const handleSendTest = async () => {
-    if (!testPhone) return alert('Insira o telefone de destino.');
+    if (!testPhone) return alert('Insere o telefone de destino.');
+
     setSendingTest(true);
     setTestResult(null);
 
@@ -348,43 +363,83 @@ export default function ClientDetailsPage({
         }),
       });
 
-      const data = await res.json();
+      const t = await res.text();
+      let j: any = {};
+      try {
+        j = JSON.parse(t);
+      } catch {
+        j = { ok: false, error: t?.slice(0, 200) };
+      }
+
       setTestResult({
         success: res.ok,
-        message: res.ok ? 'Mensagem enviada com sucesso!' : data.error || 'Erro ao enviar',
-        log: data,
+        message: res.ok ? 'Mensagem enviada com sucesso!' : j.error || 'Erro ao enviar',
+        log: j,
       });
-    } catch (error: any) {
-      setTestResult({ success: false, message: error.message });
+    } catch (e: any) {
+      setTestResult({ success: false, message: e.message });
     } finally {
       setSendingTest(false);
     }
   };
 
-  if (loading) return <div className="p-6 text-slate-500">A carregar…</div>;
+  // UI helpers: validade
+  const now = new Date();
+  const endDate = trialEnd ? new Date(trialEnd) : null;
+  const hasEnd = !!endDate && !isNaN(endDate.getTime());
+  const remainingDays = hasEnd ? daysBetween(now, endDate as Date) : null;
+  const isExpiredByDate = hasEnd ? (endDate as Date).getTime() < now.getTime() : false;
 
-  if (!client)
+  if (loading) {
     return (
-      <div className="p-6">
-        <p className="text-slate-700">Cliente não encontrado.</p>
-        <Link href="/app" className="text-indigo-600 underline">
+      <div className="p-8 text-slate-600 flex items-center gap-2">
+        <Loader2 className="h-4 w-4 animate-spin" />
+        A carregar…
+      </div>
+    );
+  }
+
+  if (!client) {
+    return (
+      <div className="p-8 space-y-4">
+        <div className="text-slate-700 font-semibold">Cliente não encontrado.</div>
+        <Link
+          href="/app/clients"
+          className="inline-flex items-center px-3 py-2 text-xs font-bold rounded-lg border border-slate-200 hover:bg-slate-50"
+        >
           Voltar
         </Link>
       </div>
     );
+  }
 
   return (
-    <div className="p-6 space-y-8">
+    <div className="space-y-8">
       {/* Header */}
-      <div className="flex items-start justify-between gap-4">
+      <div className="flex items-start justify-between gap-4 flex-wrap">
         <div>
-          <h1 className="text-2xl font-black text-slate-900">{companyName}</h1>
-          <div className="text-xs text-slate-500 mt-1">
-            {status} • {phoneE164}
-          </div>
+          <h1 className="text-3xl font-bold text-slate-900">{companyName}</h1>
+          <p className="text-slate-500 mt-1 text-sm">
+            <span className="font-mono">{phoneE164}</span> •{' '}
+            <span className="font-semibold">{String(status).toUpperCase()}</span>
+            {hasEnd && (
+              <>
+                {' '}
+                • <span className={isExpiredByDate ? 'text-rose-600 font-bold' : 'text-slate-600'}>
+                  {isExpiredByDate ? 'Expirado' : `Validade: ${trialEnd}`}
+                </span>
+                {remainingDays !== null && !isExpiredByDate && (
+                  <span className="ml-2 text-xs text-slate-500">
+                    ({remainingDays} dia{remainingDays === 1 ? '' : 's'} restantes)
+                  </span>
+                )}
+              </>
+            )}
+          </p>
         </div>
+
         <button
-          onClick={() => router.push('/app')}
+          onClick={() => router.push('/app/clients')}
           className="px-3 py-2 text-xs font-bold rounded-lg border border-slate-200 hover:bg-slate-50"
         >
           Voltar
@@ -392,10 +447,13 @@ export default function ClientDetailsPage({
       </div>
 
       {error && (
-        <div className="p-4 rounded-xl border bg-rose-50 border-rose-100">
-          <h3 className="text-sm font-bold text-rose-700">Erro ao carregar dados</h3>
-          <p className="text-xs text-rose-700 mt-1">{error}</p>
-          {hint && <p className="text-xs text-slate-600 mt-2">Sugestão: {hint}</p>}
+        <div className="bg-rose-50 border border-rose-200 rounded-2xl p-6 flex items-start gap-4">
+          <AlertCircle className="h-6 w-6 text-rose-600 shrink-0 mt-0.5" />
+          <div>
+            <h3 className="text-rose-900 font-bold">Erro ao carregar dados</h3>
+            <p className="text-rose-700 text-sm mt-1">{error}</p>
+            {hint && <p className="text-rose-600 text-xs mt-2 font-medium">💡 Sugestão: {hint}</p>}
+          </div>
         </div>
       )}
 
@@ -406,36 +464,43 @@ export default function ClientDetailsPage({
           <section className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
             <div className="p-6 border-b border-slate-100 flex items-center justify-between">
               <h2 className="text-lg font-bold text-slate-900 flex items-center gap-2">
-                <Building2 className="h-5 w-5 text-indigo-600" /> Dados do Cliente
+                <ShieldCheck className="h-5 w-5 text-indigo-600" />
+                Dados do Cliente
               </h2>
 
               <div className="flex flex-wrap gap-2 justify-end">
-                {status !== 'active' && (
-                  <button
-                    onClick={handleSubscribe}
-                    className="flex items-center gap-2 px-4 py-1.5 text-sm font-bold text-white bg-indigo-600 rounded-lg hover:bg-indigo-700 transition shadow-sm"
-                    disabled={subscribing}
-                  >
-                    {subscribing ? <Loader2 className="h-4 w-4 animate-spin" /> : <Zap className="h-4 w-4" />}
-                    Ativar Plano
-                  </button>
-                )}
-
-                {/* ✅ NOVO BOTÃO */}
+                {/* Botões de serviço */}
                 <button
-                  onClick={handleMigrateToProduction}
-                  className="flex items-center gap-2 px-4 py-1.5 text-sm font-bold text-white bg-emerald-600 rounded-lg hover:bg-emerald-700 transition shadow-sm"
-                  disabled={subscribing}
-                  title="Cria/ativa instância client-<id>, muda status para active e grava production_instance_name"
+                  onClick={handleActivate30Days}
+                  className="flex items-center gap-2 px-3 py-1.5 text-xs font-bold text-white bg-emerald-600 rounded-lg hover:bg-emerald-700 transition shadow-sm"
+                  title="Ativa por 30 dias (status active + trial_end = hoje+30)"
                 >
-                  {subscribing ? <Loader2 className="h-4 w-4 animate-spin" /> : <ShieldCheck className="h-4 w-4" />}
-                  Migrar para Produção
+                  <Clock className="h-4 w-4" />
+                  Ativar +30 dias
+                </button>
+
+                <button
+                  onClick={handleRenew30Days}
+                  className="flex items-center gap-2 px-3 py-1.5 text-xs font-bold text-white bg-indigo-600 rounded-lg hover:bg-indigo-700 transition shadow-sm"
+                  title="Renova por mais 30 dias"
+                >
+                  <Calendar className="h-4 w-4" />
+                  Renovar +30 dias
+                </button>
+
+                <button
+                  onClick={handleBlockNow}
+                  className="flex items-center gap-2 px-3 py-1.5 text-xs font-bold text-white bg-rose-600 rounded-lg hover:bg-rose-700 transition shadow-sm"
+                  title="Bloquear (expired)"
+                >
+                  <X className="h-4 w-4" />
+                  Bloquear
                 </button>
 
                 {status === 'active' && !client?.production_instance_name && (
                   <button
                     onClick={() => setIsProductionModalOpen(true)}
-                    className="flex items-center gap-2 px-4 py-1.5 text-sm font-bold text-white bg-rose-600 rounded-lg hover:bg-rose-700 transition shadow-sm"
+                    className="flex items-center gap-2 px-3 py-1.5 text-xs font-bold text-white bg-slate-900 rounded-lg hover:bg-slate-800 transition shadow-sm"
                   >
                     <Smartphone className="h-4 w-4" />
                     Portar / Criar Instância
@@ -443,17 +508,9 @@ export default function ClientDetailsPage({
                 )}
 
                 <button
-                  onClick={handleRenew3Days}
-                  className="flex items-center gap-2 px-4 py-1.5 text-sm font-bold text-white bg-slate-700 rounded-lg hover:bg-slate-800 transition shadow-sm"
-                >
-                  <Clock className="h-4 w-4" />
-                  Renovar 3 dias
-                </button>
-
-                <button
                   onClick={handleSaveData}
                   disabled={saving}
-                  className="flex items-center gap-2 px-4 py-1.5 text-sm font-bold text-white bg-slate-900 rounded-lg hover:bg-black transition shadow-sm disabled:opacity-60"
+                  className="flex items-center gap-2 px-3 py-1.5 text-xs font-bold text-white bg-slate-900 rounded-lg hover:bg-slate-800 transition disabled:opacity-50 shadow-sm"
                 >
                   {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : savedFeedback === 'data' ? <Check className="h-4 w-4" /> : <Save className="h-4 w-4" />}
                   {savedFeedback === 'data' ? 'Guardado' : 'Guardar Dados'}
@@ -463,7 +520,9 @@ export default function ClientDetailsPage({
 
             <div className="p-6 grid grid-cols-1 md:grid-cols-2 gap-4">
               <div>
-                <label className="block text-xs font-bold text-slate-500 uppercase tracking-wider mb-1">Nome da Empresa</label>
+                <label className="block text-xs font-bold text-slate-500 uppercase tracking-wider mb-1">
+                  Nome da Empresa
+                </label>
                 <input
                   value={companyName}
                   onChange={(e) => setCompanyName(e.target.value)}
@@ -472,7 +531,9 @@ export default function ClientDetailsPage({
               </div>
 
               <div>
-                <label className="block text-xs font-bold text-slate-500 uppercase tracking-wider mb-1">Telefone (E.164)</label>
+                <label className="block text-xs font-bold text-slate-500 uppercase tracking-wider mb-1">
+                  Telefone (E.164)
+                </label>
                 <input
                   value={phoneE164}
                   onChange={(e) => setPhoneE164(e.target.value)}
@@ -481,7 +542,9 @@ export default function ClientDetailsPage({
               </div>
 
               <div>
-                <label className="block text-xs font-bold text-slate-500 uppercase tracking-wider mb-1">Instância Evolution (Teste)</label>
+                <label className="block text-xs font-bold text-slate-500 uppercase tracking-wider mb-1">
+                  Instância Evolution (Teste)
+                </label>
                 <input
                   value={instanceName}
                   onChange={(e) => setInstanceName(e.target.value)}
@@ -490,7 +553,9 @@ export default function ClientDetailsPage({
               </div>
 
               <div>
-                <label className="block text-xs font-bold text-slate-500 uppercase tracking-wider mb-1">Instância Evolution (Produção)</label>
+                <label className="block text-xs font-bold text-slate-500 uppercase tracking-wider mb-1">
+                  Instância Evolution (Produção)
+                </label>
                 <input
                   value={productionInstanceName}
                   onChange={(e) => setProductionInstanceName(e.target.value)}
@@ -500,7 +565,9 @@ export default function ClientDetailsPage({
               </div>
 
               <div>
-                <label className="block text-xs font-bold text-slate-500 uppercase tracking-wider mb-1">Status</label>
+                <label className="block text-xs font-bold text-slate-500 uppercase tracking-wider mb-1">
+                  Status
+                </label>
                 <select
                   value={status}
                   onChange={(e) => setStatus(e.target.value)}
@@ -513,7 +580,9 @@ export default function ClientDetailsPage({
               </div>
 
               <div>
-                <label className="block text-xs font-bold text-slate-500 uppercase tracking-wider mb-1">Expira em</label>
+                <label className="block text-xs font-bold text-slate-500 uppercase tracking-wider mb-1">
+                  Validade (trial_end)
+                </label>
                 <input
                   type="date"
                   value={trialEnd}
@@ -522,25 +591,38 @@ export default function ClientDetailsPage({
                 />
               </div>
             </div>
+
+            {isExpiredByDate && (
+              <div className="px-6 pb-6">
+                <div className="bg-rose-50 border border-rose-200 rounded-xl p-4 text-rose-800 text-sm">
+                  ⚠️ Este cliente está <b>expirado pela data</b>. Se não pagar, deve ficar bloqueado (status expired).
+                </div>
+              </div>
+            )}
           </section>
 
           {/* B) Prompt do Bot */}
-          <section className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+          <section className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden relative">
             <div className="p-6 border-b border-slate-100 flex items-center justify-between">
               <h2 className="text-lg font-bold text-slate-900 flex items-center gap-2">
-                <Bot className="h-5 w-5 text-indigo-600" /> Prompt do Bot
+                <Bot className="h-5 w-5 text-indigo-600" />
+                Prompt do Bot
               </h2>
 
               <div className="flex items-center gap-3">
                 <label className="flex items-center gap-2 text-xs font-bold text-slate-600">
-                  <input checked={forcePTPT} onChange={(e) => setForcePTPT(e.target.checked)} type="checkbox" />
+                  <input
+                    checked={forcePTPT}
+                    onChange={(e) => setForcePTPT(e.target.checked)}
+                    type="checkbox"
+                  />
                   Forçar PT-PT
                 </label>
 
                 <button
                   onClick={handleSavePrompt}
                   disabled={saving}
-                  className="flex items-center gap-2 px-4 py-1.5 text-sm font-bold text-white bg-slate-900 rounded-lg hover:bg-black transition shadow-sm disabled:opacity-60"
+                  className="flex items-center gap-2 px-4 py-1.5 text-sm font-bold text-white bg-slate-900 rounded-lg hover:bg-slate-800 transition disabled:opacity-50 shadow-sm"
                 >
                   {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : savedFeedback === 'prompt' ? <Check className="h-4 w-4" /> : <Save className="h-4 w-4" />}
                   {savedFeedback === 'prompt' ? 'Guardado' : 'Guardar Prompt'}
@@ -571,7 +653,7 @@ export default function ClientDetailsPage({
                 <button
                   onClick={() => {
                     if (confirm('Deseja repor o prompt para o template padrão?')) {
-                      setBotInstructions('Olá! Sou o assistente virtual da ' + companyName + '.\nComo posso ajudar?');
+                      setBotInstructions(`Olá! Sou o assistente virtual da ${companyName}.\nComo posso ajudar?`);
                     }
                   }}
                   className="p-2 bg-white border border-slate-200 rounded-lg shadow-sm hover:bg-slate-50 transition text-slate-500"
@@ -587,8 +669,10 @@ export default function ClientDetailsPage({
           <section className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
             <div className="p-6 border-b border-slate-100 flex items-center justify-between">
               <h2 className="text-lg font-bold text-slate-900 flex items-center gap-2">
-                <MessageSquare className="h-5 w-5 text-indigo-600" /> Mensagens do Cliente
+                <MessageSquare className="h-5 w-5 text-indigo-600" />
+                Mensagens do Cliente
               </h2>
+
               <div className="flex gap-2">
                 <button
                   onClick={() => setMsgPage(Math.max(1, msgPage - 1))}
@@ -657,13 +741,14 @@ export default function ClientDetailsPage({
           <section className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
             <div className="p-6 border-b border-slate-100">
               <h2 className="text-lg font-bold text-slate-900 flex items-center gap-2">
-                <Sparkles className="h-5 w-5 text-amber-500" /> Gerar Prompt Automático
+                <Sparkles className="h-5 w-5 text-amber-500" />
+                Gerar Prompt Automático
               </h2>
             </div>
 
             <div className="p-6 space-y-4">
               <p className="text-xs text-slate-500 leading-relaxed">
-                Insira o link do Google Maps para extrair dados do negócio e gerar um prompt otimizado.
+                Cola o link do Google Maps para extrair dados do negócio e gerar um prompt otimizado.
               </p>
 
               <div className="space-y-3">
@@ -691,7 +776,8 @@ export default function ClientDetailsPage({
           <section className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
             <div className="p-6 border-b border-slate-100">
               <h2 className="text-lg font-bold text-slate-900 flex items-center gap-2">
-                <Send className="h-5 w-5 text-emerald-500" /> Teste WhatsApp
+                <Send className="h-5 w-5 text-emerald-500" />
+                Teste WhatsApp
               </h2>
             </div>
 
@@ -754,9 +840,9 @@ export default function ClientDetailsPage({
             </div>
           </section>
 
-          {/* Quick Info Card */}
+          {/* Estado da Instância */}
           <section className="bg-slate-900 rounded-2xl p-6 text-white shadow-xl overflow-hidden relative">
-            <div className="absolute -right-4 -top-4 w-24 h-24 bg-indigo-500/20 rounded-full blur-2xl"></div>
+            <div className="absolute -right-4 -top-4 w-24 h-24 bg-indigo-500/20 rounded-full blur-2xl" />
             <h3 className="text-sm font-bold uppercase tracking-widest text-indigo-400 mb-4">Estado da Instância</h3>
 
             <div className="space-y-3">
@@ -764,22 +850,23 @@ export default function ClientDetailsPage({
                 <span className="text-slate-400">Teste:</span>
                 <span className="font-mono font-bold">{instanceName || 'N/A'}</span>
               </div>
-
               <div className="flex justify-between items-center text-xs">
                 <span className="text-slate-400">Produção:</span>
                 <span className="font-mono font-bold text-emerald-400">{productionInstanceName || 'N/A'}</span>
               </div>
-
               <div className="flex justify-between items-center text-xs">
                 <span className="text-slate-400">Ligação:</span>
                 <span className="flex items-center gap-1.5 text-emerald-400 font-bold">
-                  <div className="w-1.5 h-1.5 bg-emerald-400 rounded-full animate-pulse"></div> Operacional
+                  <span className="w-1.5 h-1.5 bg-emerald-400 rounded-full animate-pulse" />
+                  Operacional
                 </span>
               </div>
             </div>
           </section>
         </div>
       </div>
+
+      <DebugPanel endpoint={endpoint} error={error} hint={hint} data={client} />
 
       <ProductionInstanceModal
         isOpen={isProductionModalOpen}
