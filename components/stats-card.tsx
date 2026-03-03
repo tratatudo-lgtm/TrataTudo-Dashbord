@@ -1,45 +1,46 @@
-import { LucideIcon } from 'lucide-react';
+import React from "react";
 
-interface StatsCardProps {
+type StatsColor =
+  | "blue"
+  | "green"
+  | "amber"
+  | "red"
+  | "indigo"
+  | "purple"
+  | "slate";
+
+export type StatsCardProps = {
   title: string;
-  value: string | number;
-  icon: LucideIcon;
-  color: 'emerald' | 'indigo' | 'rose' | 'blue' | 'amber';
-  trend?: string;
-}
+  value: React.ReactNode;
+  icon: React.ElementType;
+  /** Opcional: se não vier, usamos "indigo" */
+  color?: StatsColor;
+};
 
-export function StatsCard({ title, value, icon: Icon, color, trend }: StatsCardProps) {
-  const colorClasses = {
-    emerald: 'bg-emerald-50 text-emerald-600 border-emerald-100',
-    indigo: 'bg-indigo-50 text-indigo-600 border-indigo-100',
-    rose: 'bg-rose-50 text-rose-600 border-rose-100',
-    blue: 'bg-blue-50 text-blue-600 border-blue-100',
-    amber: 'bg-amber-50 text-amber-600 border-amber-100',
-  };
+const COLOR_STYLES: Record<StatsColor, { bg: string; text: string; ring: string }> = {
+  blue:   { bg: "bg-blue-50",   text: "text-blue-700",   ring: "ring-blue-200" },
+  green:  { bg: "bg-green-50",  text: "text-green-700",  ring: "ring-green-200" },
+  amber:  { bg: "bg-amber-50",  text: "text-amber-700",  ring: "ring-amber-200" },
+  red:    { bg: "bg-red-50",    text: "text-red-700",    ring: "ring-red-200" },
+  indigo: { bg: "bg-indigo-50", text: "text-indigo-700", ring: "ring-indigo-200" },
+  purple: { bg: "bg-purple-50", text: "text-purple-700", ring: "ring-purple-200" },
+  slate:  { bg: "bg-slate-50",  text: "text-slate-700",  ring: "ring-slate-200" },
+};
 
-  const iconBgClasses = {
-    emerald: 'bg-emerald-100',
-    indigo: 'bg-indigo-100',
-    rose: 'bg-rose-100',
-    blue: 'bg-blue-100',
-    amber: 'bg-amber-100',
-  };
+export default function StatsCard({ title, value, icon: Icon, color = "indigo" }: StatsCardProps) {
+  const c = COLOR_STYLES[color] ?? COLOR_STYLES.indigo;
 
   return (
-    <div className={`p-6 rounded-2xl bg-white border border-slate-200 shadow-sm hover:shadow-md transition group`}>
-      <div className="flex items-start justify-between mb-4">
-        <div className={`p-3 rounded-xl ${iconBgClasses[color]} ${colorClasses[color].split(' ')[1]} group-hover:scale-110 transition-transform`}>
-          <Icon className="h-6 w-6" />
+    <div className="rounded-2xl bg-white p-4 shadow-sm ring-1 ring-black/5">
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <p className="text-xs text-slate-500">{title}</p>
+          <p className="mt-1 text-2xl font-semibold text-slate-900">{value}</p>
         </div>
-        {trend && (
-          <span className="text-[10px] font-bold text-emerald-600 bg-emerald-50 px-2 py-1 rounded-full">
-            {trend}
-          </span>
-        )}
-      </div>
-      <div>
-        <p className="text-sm font-medium text-slate-500">{title}</p>
-        <h3 className="text-3xl font-bold text-slate-900 mt-1">{value}</h3>
+
+        <div className={`shrink-0 rounded-xl ${c.bg} ${c.text} ring-1 ${c.ring} p-2`}>
+          <Icon className="h-5 w-5" />
+        </div>
       </div>
     </div>
   );
