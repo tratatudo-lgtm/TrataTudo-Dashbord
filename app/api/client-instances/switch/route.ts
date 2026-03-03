@@ -21,7 +21,7 @@ export async function POST(request: Request) {
       );
     }
 
-    // 1) Desativar todas as instâncias do cliente
+    // desativa todas
     const { error: offErr } = await supabase
       .from("client_instances")
       .update({ status: "inactive" })
@@ -29,7 +29,7 @@ export async function POST(request: Request) {
 
     if (offErr) throw offErr;
 
-    // 2) Se já existe esta instância, ativar. Se não existe, criar como active.
+    // ativa ou cria
     const { data: existing, error: exErr } = await supabase
       .from("client_instances")
       .select("id")
@@ -62,7 +62,7 @@ export async function POST(request: Request) {
 
     return NextResponse.json({ ok: true });
   } catch (error: any) {
-    console.error("API client-instances switch error:", error);
+    console.error("Switch instance error:", error);
     return NextResponse.json({ ok: false, error: error.message }, { status: 500 });
   }
 }
