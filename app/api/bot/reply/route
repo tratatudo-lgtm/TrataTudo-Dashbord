@@ -1,346 +1,101 @@
-import { NextResponse } from "next/server";
-import { createClient as createSbAdmin } from "@supabase/supabase-js";
+import { NextResponse } from 'next/server';
+import { createClient } from '@/lib/supabase/server';
+import { getSystemBasePrompt, mergePrompts } from '@/lib/promptBase';
 
-function unauthorized() {
-  return NextResponse.json({ ok: false, error: "Não autorizado" }, { status: 401 });
-}
-function bad(msg: string, status = 400) {
-  return NextResponse.json({ ok: false, error: msg }, { status });
-}
-function getSupabaseAdmin() {
-  const url = process.env.NEXT_PUBLIC_SUPABASE_URL!;
-  const key = process.env.SUPABASE_SERVICE_ROLE_KEY!;
-  if (!url || !key) throw new Error("Missing Supabase env vars");
-  return createSbAdmin(url, key, { auth: { persistSession: false } });
-}
-
-const BOT_NAME = "Valenciano";
-
-function normalizeText(s: any) {
-  return String(s || "").replace(/\s+/g, " ").trim();
-}
-function toUpper(s: string) {
-  return s.toUpperCase().trim();
-}
-function isYes(s: string) {
-  const t = s.toLowerCase().trim();
-  return ["sim", "s", "ok", "certo", "confirmo", "confirmar", "isso"].includes(t);
-}
-function isNo(s: string) {
-  const t = s.toLowerCase().trim();
-  return ["não", "nao", "n", "nop"].includes(t);
-}
-function makeTracking() {
-  return `TT-${Math.random().toString(36).slice(2, 8).toUpperCase()}`;
-}
-function minutesAgo(d: string) {
-  return (Date.now() - new Date(d).getTime()) / 60000;
-}
-
-type Flow = {
-  flow_key: string;
-  title: string;
-  enabled: boolean;
-  schema: {
-    kind: string;
-    category_default?: string;
-    match?: { keywords?: string[] };
-    steps: Array<{
-      key: string;
-      ask: string;
-      type: "text" | "text_optional" | "enum";
-      options?: string[];
-      when?: { field: string; eq: string };
-    }>;
-  };
-};
-
-async function loadFlows(supabase: any, client_id: number): Promise<Flow[]> {
-  const { data, error } = await supabase
-    .from("flow_defs")
-    .select("flow_key, title, enabled, schema")
-    .eq("client_id", client_id)
-    .eq("enabled", true);
-  if (error) throw error;
-  return (data || []) as Flow[];
-}
-
-async function loadState(supabase: any, client_id: number, phone_e164: string) {
-  const { data, error } = await supabase
-    .from("conversation_state")
-    .select("id, intent, step, data, updated_at")
-    .eq("client_id", client_id)
-    .eq("phone_e164", phone_e164)
-    .maybeSingle();
-  if (error) throw error;
-  return data || null;
-}
-
-async function upsertState(supabase: any, client_id: number, phone_e164: string, intent: string, step: string, data: any, lastUser?: string, lastBot?: string) {
-  const { error } = await supabase
-    .from("conversation_state")
-    .upsert(
-      [
-        {
-          client_id,
-          phone_e164,
-          intent,
-          step,
-          data,
-          last_user_message: lastUser || null,
-          last_bot_message: lastBot || null,
-        },
-      ],
-      { onConflict: "client_id,phone_e164" }
-    );
-  if (error) throw error;
-}
-
-async function clearState(supabase: any, client_id: number, phone_e164: string) {
-  await supabase.from("conversation_state").delete().eq("client_id", client_id).eq("phone_e164", phone_e164);
-}
-
-function pickFlow(flows: Flow[], text: string): Flow | null {
-  const t = text.toLowerCase();
-  // escolhe o flow com mais “matches” por keywords
-  let best: { flow: Flow; score: number } | null = null;
-
-  for (const f of flows) {
-    const kws = f.schema?.match?.keywords || [];
-    let score = 0;
-    for (const k of kws) {
-      if (k && t.includes(k.toLowerCase())) score++;
-    }
-    if (!best || score > best.score) best = { flow: f, score };
-  }
-
-  if (best && best.score > 0) return best.flow;
-
-  // fallback: se nenhum match, usa request como padrão (se existir)
-  const req = flows.find((x) => x.flow_key === "request");
-  return req || (flows[0] || null);
-}
-
-function checkWhen(step: any, answers: any) {
-  if (!step.when) return true;
-  const v = String(answers?.[step.when.field] || "").toLowerCase().trim();
-  return v === String(step.when.eq || "").toLowerCase().trim();
-}
-
-function nextStepIndex(flow: Flow, currentIdx: number, answers: any) {
-  for (let i = currentIdx; i < flow.schema.steps.length; i++) {
-    if (checkWhen(flow.schema.steps[i], answers)) return i;
-  }
-  return -1;
-}
-
-function humanizeStatus(status: string) {
-  switch (status) {
-    case "new": return "novo";
-    case "triage": return "em análise";
-    case "in_progress": return "em resolução";
-    case "waiting_customer": return "a aguardar a tua resposta";
-    case "done": return "concluído";
-    case "cancelled": return "cancelado";
-    default: return status;
-  }
+function isValidApiKey(req: Request) {
+  const key = req.headers.get('x-tratatudo-key') || '';
+  const expected = process.env.TRATATUDO_API_KEY || '';
+  return expected.length > 0 && key === expected;
 }
 
 export async function POST(req: Request) {
   try {
-    // 🔐 proteção
-    const apiKey = req.headers.get("x-tratatudo-key") || "";
-    const expected = process.env.ADMIN_API_KEY || "";
-    if (!expected || apiKey !== expected) return unauthorized();
+    // Auth: API key (server-to-server) OU sessão (dashboard)
+    const supabase = createClient();
+    const apiKeyOk = isValidApiKey(req);
+    const { data: { session } } = await supabase.auth.getSession();
+    if (!apiKeyOk && !session) {
+      return NextResponse.json({ ok: false, error: 'Não autorizado' }, { status: 401 });
+    }
 
-    const supabase = getSupabaseAdmin();
-
-    const body = await req.json().catch(() => ({}));
+    const body = await req.json();
     const client_id = Number(body.client_id);
-    const phone_e164 = normalizeText(body.phone_e164);
-    const text = normalizeText(body.text);
+    const phone_e164 = String(body.phone_e164 || '');
+    const text = String(body.text || '');
 
-    if (!client_id) return bad("client_id é obrigatório");
-    if (!phone_e164) return bad("phone_e164 é obrigatório");
-    if (!text) return bad("text é obrigatório");
-
-    // permitir cancelar fluxo
-    if (["cancelar", "anular", "parar"].includes(text.toLowerCase().trim())) {
-      await clearState(supabase, client_id, phone_e164);
-      return NextResponse.json({ ok: true, reply: `Ok 👍 Cancelado. Em que posso ajudar agora? 🙂` });
+    if (!client_id || !phone_e164 || !text) {
+      return NextResponse.json(
+        { ok: false, error: 'client_id, phone_e164 e text são obrigatórios' },
+        { status: 400 }
+      );
     }
 
-    // carregar flows
-    const flows = await loadFlows(supabase, client_id);
+    // 1) Buscar client prompt
+    const { data: client, error: cErr } = await supabase
+      .from('clients')
+      .select('id, bot_instructions, company_name')
+      .eq('id', client_id)
+      .single();
+    if (cErr) throw cErr;
 
-    // estado atual
-    let state = await loadState(supabase, client_id, phone_e164);
+    // 2) Buscar base prompt global
+    const base = await getSystemBasePrompt();
+    const finalPrompt = mergePrompts(base, client?.bot_instructions || '');
 
-    // expirar estado velho (30 min)
-    if (state && minutesAgo(state.updated_at) > 30) {
-      await clearState(supabase, client_id, phone_e164);
-      state = null;
+    if (!finalPrompt) {
+      return NextResponse.json(
+        { ok: false, error: 'Prompt vazio. Define SYSTEM_BASE_PROMPT ou bot_instructions.' },
+        { status: 500 }
+      );
     }
 
-    // --- comando “estado TT-XXXXXX” universal (não depende de flow) ---
-    const codeMatch = toUpper(text).match(/TT-[A-Z0-9]{4,12}/);
-    if (text.toLowerCase().startsWith("estado") || codeMatch) {
-      const code = codeMatch ? codeMatch[0] : toUpper(text).replace("ESTADO", "").trim();
-      if (!code) return NextResponse.json({ ok: true, reply: `Diz-me o código (ex: TT-ABC123) 🙂` });
+    // 3) Chamar Groq (modelo do env)
+    const groqKey = process.env.GROQ_API_KEY || '';
+    const model = process.env.GROQ_MODEL || 'llama-3.1-8b-instant';
+    if (!groqKey) {
+      return NextResponse.json({ ok: false, error: 'GROQ_API_KEY em falta' }, { status: 500 });
+    }
 
-      const { data: ticket, error } = await supabase
-        .from("tickets")
-        .select("tracking_code, status, updated_at")
-        .eq("client_id", client_id)
-        .eq("tracking_code", code)
-        .maybeSingle();
+    // Mensagens: system + user
+    const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${groqKey}`,
+      },
+      body: JSON.stringify({
+        model,
+        temperature: 0.2,
+        messages: [
+          { role: 'system', content: finalPrompt },
+          { role: 'user', content: text }
+        ],
+      }),
+    });
 
-      if (error) throw error;
+    const raw = await res.text();
+    let data: any;
+    try { data = JSON.parse(raw); } catch { data = null; }
 
-      if (!ticket) {
-        return NextResponse.json({ ok: true, reply: `Não encontrei esse código 😕 Confirma se está certo (ex: TT-ABC123).` });
+    if (!res.ok || !data) {
+      return NextResponse.json(
+        { ok: false, error: 'Erro ao chamar Groq', debug: raw?.slice(0, 500) },
+        { status: 500 }
+      );
+    }
+
+    const reply = data?.choices?.[0]?.message?.content || '';
+
+    return NextResponse.json({
+      ok: true,
+      data: {
+        client_id,
+        phone_e164,
+        reply,
       }
-
-      return NextResponse.json({ ok: true, reply: `O pedido *${ticket.tracking_code}* está *${humanizeStatus(ticket.status)}* 🙂` });
-    }
-
-    // --- se não existe estado, escolher flow e iniciar ---
-    if (!state) {
-      const flow = pickFlow(flows, text);
-      if (!flow) {
-        return NextResponse.json({
-          ok: true,
-          reply: `Olá 🙂 Sou o ${BOT_NAME}. Diz-me só o que precisas (pedido, reclamação, encomenda, reserva)…`,
-        });
-      }
-
-      const answers = {}; // começa vazio
-      const idx = nextStepIndex(flow, 0, answers);
-      const step = flow.schema.steps[idx];
-
-      const data = { flow_key: flow.flow_key, step_index: idx, answers };
-      const botMsg = step?.ask || `Ok 🙂 Diz-me só mais detalhes, por favor.`;
-
-      await upsertState(supabase, client_id, phone_e164, flow.flow_key, `step_${idx}`, data, text, botMsg);
-      return NextResponse.json({ ok: true, reply: botMsg });
-    }
-
-    // --- continuar flow existente ---
-    const flowKey = String(state.intent);
-    const flow = flows.find((f) => f.flow_key === flowKey);
-
-    // se o flow foi desativado, reset suave
-    if (!flow) {
-      await clearState(supabase, client_id, phone_e164);
-      return NextResponse.json({ ok: true, reply: `Ok 🙂 Vamos recomeçar. O que precisas? (pedido, reclamação, encomenda, reserva)` });
-    }
-
-    const stData = state.data || {};
-    const answers = stData.answers || {};
-    let idx = Number(stData.step_index ?? 0);
-
-    // guardar resposta no passo atual (se existir)
-    const currentStep = flow.schema.steps[idx];
-    if (currentStep) {
-      // valida enum
-      if (currentStep.type === "enum") {
-        const opt = (currentStep.options || []).map((o) => o.toLowerCase());
-        const v = text.toLowerCase().trim();
-        if (!opt.includes(v)) {
-          return NextResponse.json({ ok: true, reply: `Só para eu acertar 🙂 escolhe uma destas: ${currentStep.options?.join(", ")}.` });
-        }
-        answers[currentStep.key] = v;
-      } else if (currentStep.type === "text_optional") {
-        answers[currentStep.key] = isNo(text) ? null : text;
-      } else {
-        answers[currentStep.key] = text;
-      }
-    }
-
-    // avançar para o próximo passo que cumpre “when”
-    let nextIdx = nextStepIndex(flow, idx + 1, answers);
-
-    // se acabou, criar ticket e devolver tracking_code
-    if (nextIdx === -1) {
-      const kind = flow.schema.kind || "request";
-      const category = String(answers.category || flow.schema.category_default || "Geral");
-      const urgency = String(answers.urgency || "não").toLowerCase();
-      const priority = urgency === "sim" ? "high" : "medium";
-
-      const subject =
-        kind === "complaint"
-          ? `Reclamação: ${category}`
-          : kind === "order"
-          ? `Encomenda/Reserva`
-          : `Pedido`;
-
-      const description =
-        answers.description ||
-        answers.details ||
-        answers.request_type ||
-        `Pedido registado via bot (${flow.flow_key}).`;
-
-      const location_text = answers.location_text || null;
-      const customer_name = answers.customer_name || null;
-      const customer_contact = answers.customer_contact || phone_e164;
-
-      // cria ticket
-      const tracking_code = makeTracking();
-      const raw = {
-        __REPORT__: true,
-        flow_key: flow.flow_key,
-        kind,
-        category,
-        priority,
-        channel: "whatsapp",
-        language: "pt-PT",
-        ...answers,
-      };
-
-      const { data: created, error: insErr } = await supabase
-        .from("tickets")
-        .insert([
-          {
-            client_id,
-            tracking_code,
-            kind,
-            category,
-            subject,
-            description,
-            priority,
-            status: "new",
-            customer_name,
-            customer_contact,
-            location_text,
-            channel: "whatsapp",
-            metadata: { flow_key: flow.flow_key },
-            raw,
-          },
-        ])
-        .select("tracking_code, status")
-        .single();
-
-      if (insErr) throw insErr;
-
-      await clearState(supabase, client_id, phone_e164);
-
-      const reply =
-        `✅ Registado! O teu código é *${created.tracking_code}*.\n` +
-        `Para acompanhar, escreve: *estado ${created.tracking_code}* 🙂`;
-
-      return NextResponse.json({ ok: true, reply, tracking_code: created.tracking_code });
-    }
-
-    // perguntar próximo passo
-    const nextStep = flow.schema.steps[nextIdx];
-    const botMsg = nextStep?.ask || `Ok 🙂 Diz-me só mais um detalhe.`;
-
-    const newData = { flow_key: flow.flow_key, step_index: nextIdx, answers };
-    await upsertState(supabase, client_id, phone_e164, flow.flow_key, `step_${nextIdx}`, newData, text, botMsg);
-
-    return NextResponse.json({ ok: true, reply: botMsg });
-  } catch (e: any) {
-    console.error("BOT REPLY ERROR:", e);
-    return NextResponse.json({ ok: false, error: e.message }, { status: 500 });
+    });
+  } catch (err: any) {
+    console.error('BOT REPLY error:', err);
+    return NextResponse.json({ ok: false, error: err?.message || 'Erro interno' }, { status: 500 });
   }
 }
