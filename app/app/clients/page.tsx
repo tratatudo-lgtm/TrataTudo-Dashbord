@@ -2,14 +2,36 @@
 
 import { useState, useEffect } from 'react';
 import Link from 'next/link';
-import { Edit2, ExternalLink, Copy, Zap, Search, Plus, Filter, AlertCircle, Users, Loader2 } from 'lucide-react';
+import { Search, Filter, AlertCircle, Users, Loader2 } from 'lucide-react';
 import { ClientActionButtons } from '@/components/clients/client-action-buttons';
 import { ClientQuickActions } from '@/components/clients/client-quick-actions';
 import { useSearchParams, useRouter } from 'next/navigation';
 
+function formatDatePt(d: string) {
+  try {
+    return new Date(d).toLocaleDateString('pt-PT');
+  } catch {
+    return d;
+  }
+}
+
+function getStatusPill(status: string) {
+  const s = (status || '').toLowerCase();
+
+  if (s === 'active') {
+    return 'bg-emerald-100 text-emerald-700';
+  }
+  if (s === 'trial') {
+    return 'bg-indigo-100 text-indigo-700';
+  }
+  // expired / blocked / etc
+  return 'bg-rose-100 text-rose-700';
+}
+
 export default function ClientsPage() {
   const searchParams = useSearchParams();
   const router = useRouter();
+
   const status = searchParams.get('status') || 'all';
   const query = searchParams.get('q') || '';
 
@@ -20,11 +42,13 @@ export default function ClientsPage() {
   const fetchClients = async () => {
     setLoading(true);
     setError(null);
+
     try {
-      const endpoint = `/api/clients?status=${status}&q=${query}`;
+      // ✅ CORREÇÃO: usar endpoint admin (devolve effective_status, days_remaining, etc.)
+      const endpoint = `/api/admin/clients?status=${encodeURIComponent(status)}&q=${encodeURIComponent(query)}`;
       const res = await fetch(endpoint);
       const text = await res.text();
-      
+
       let json: any = {};
       try {
         json = JSON.parse(text);
@@ -48,15 +72,18 @@ export default function ClientsPage() {
 
   useEffect(() => {
     fetchClients();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [status, query]);
 
   const handleSearch = (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     const formData = new FormData(e.currentTarget);
-    const q = formData.get('q') as string;
+    const q = (formData.get('q') as string) || '';
+
     const params = new URLSearchParams(searchParams.toString());
-    if (q) params.set('q', q);
+    if (q.trim()) params.set('q', q.trim());
     else params.delete('q');
+
     router.push(`/app/clients?${params.toString()}`);
   };
 
@@ -76,7 +103,7 @@ export default function ClientsPage() {
           <div>
             <h3 className="text-rose-900 font-bold">Erro ao carregar dados</h3>
             <p className="text-rose-700 text-sm mt-1">{error}</p>
-            <button 
+            <button
               onClick={() => fetchClients()}
               className="mt-3 text-xs font-bold text-rose-600 hover:text-rose-800 underline"
             >
@@ -99,13 +126,13 @@ export default function ClientsPage() {
             />
           </form>
         </div>
-        
+
         <div className="flex items-center gap-2 w-full md:w-auto overflow-x-auto pb-2 md:pb-0">
           <Filter className="h-4 w-4 text-slate-400 shrink-0" />
           {['all', 'trial', 'active', 'expired'].map((s) => (
             <Link
               key={s}
-              href={`/app/clients?status=${s}${query ? `&q=${query}` : ''}`}
+              href={`/app/clients?status=${s}${query ? `&q=${encodeURIComponent(query)}` : ''}`}
               className={`whitespace-nowrap rounded-full px-4 py-1.5 text-xs font-medium transition ${
                 status === s
                   ? 'bg-indigo-600 text-white shadow-sm'
@@ -131,6 +158,7 @@ export default function ClientsPage() {
                 <th className="px-6 py-4 text-right">Ações</th>
               </tr>
             </thead>
+
             <tbody className="divide-y divide-slate-100 text-sm text-slate-700">
               {loading ? (
                 <tr>
@@ -142,50 +170,68 @@ export default function ClientsPage() {
                   </td>
                 </tr>
               ) : clients.length > 0 ? (
-                clients.map((client) => (
-                  <tr key={client.id} className="hover:bg-slate-50/50 transition-colors group">
-                    <td className="px-6 py-4">
-                      <div className="font-semibold text-slate-900">
-                        {client.company_name}
-                      </div>
-                      <div className="text-[10px] text-slate-400 font-mono mt-0.5">ID: {String(client.id).substring(0, 8)}...</div>
-                    </td>
-                    <td className="px-6 py-4 font-mono text-xs">
-                      {client.phone_e164}
-                    </td>
-                    <td className="px-6 py-4">
-                      <code className="px-2 py-0.5 bg-slate-100 rounded text-[10px] font-mono text-slate-600">
-                        {client.instance_name || '-'}
-                      </code>
-                    </td>
-                    <td className="px-6 py-4">
-                      <span className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-[10px] font-bold uppercase tracking-wider ${
-                        client.status === 'active' ? 'bg-emerald-100 text-emerald-700' :
-                        client.status === 'trial' ? 'bg-indigo-100 text-indigo-700' :
-                        'bg-rose-100 text-rose-700'
-                      }`}>
-                        {client.status || 'N/A'}
-                      </span>
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap">
-                      {client.trial_end ? (
-                        <div className="flex flex-col">
-                          <span className="text-slate-900 font-medium">
-                            {new Date(client.trial_end).toLocaleDateString('pt-PT')}
-                          </span>
-                          <span className="text-[10px] text-slate-400">
-                            {new Date(client.trial_end) < new Date() ? 'Expirado' : 'Válido'}
-                          </span>
+                clients.map((client) => {
+                  const effective = (client.effective_status || client.status || 'trial').toLowerCase();
+                  const days = client.days_remaining; // number | null
+                  const exp = client.trial_end as string | null;
+
+                  return (
+                    <tr key={client.id} className="hover:bg-slate-50/50 transition-colors group">
+                      <td className="px-6 py-4">
+                        <div className="font-semibold text-slate-900">
+                          {client.company_name}
                         </div>
-                      ) : (
-                        <span className="text-slate-400">-</span>
-                      )}
-                    </td>
-                    <td className="px-6 py-4 text-right">
-                      <ClientQuickActions client={client} />
-                    </td>
-                  </tr>
-                ))
+                        <div className="text-[10px] text-slate-400 font-mono mt-0.5">
+                          ID: {String(client.id).substring(0, 8)}...
+                        </div>
+                      </td>
+
+                      <td className="px-6 py-4 font-mono text-xs">
+                        {client.phone_e164}
+                      </td>
+
+                      <td className="px-6 py-4">
+                        <code className="px-2 py-0.5 bg-slate-100 rounded text-[10px] font-mono text-slate-600">
+                          {client.production_instance_name || client.instance_name || '-'}
+                        </code>
+                      </td>
+
+                      <td className="px-6 py-4">
+                        <span
+                          className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-[10px] font-bold uppercase tracking-wider ${getStatusPill(effective)}`}
+                          title={client.is_expired_by_date ? 'Expirado pela data (bloqueado)' : 'Ativo'}
+                        >
+                          {effective}
+                        </span>
+
+                        {typeof days === 'number' && (
+                          <div className="text-[10px] text-slate-400 mt-1">
+                            {days >= 0 ? `${days} dia(s) restantes` : `${Math.abs(days)} dia(s) expirado`}
+                          </div>
+                        )}
+                      </td>
+
+                      <td className="px-6 py-4 whitespace-nowrap">
+                        {exp ? (
+                          <div className="flex flex-col">
+                            <span className="text-slate-900 font-medium">
+                              {formatDatePt(exp)}
+                            </span>
+                            <span className="text-[10px] text-slate-400">
+                              {client.is_expired_by_date ? 'Expirado' : 'Válido'}
+                            </span>
+                          </div>
+                        ) : (
+                          <span className="text-slate-400">-</span>
+                        )}
+                      </td>
+
+                      <td className="px-6 py-4 text-right">
+                        <ClientQuickActions client={client} />
+                      </td>
+                    </tr>
+                  );
+                })
               ) : (
                 <tr>
                   <td colSpan={6} className="px-6 py-12 text-center">
