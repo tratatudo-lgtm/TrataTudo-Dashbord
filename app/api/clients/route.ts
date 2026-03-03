@@ -1,6 +1,8 @@
 import { createClient } from '@/lib/supabase/server';
 import { NextResponse } from 'next/server';
 
+const DEFAULT_INSTANCE_NAME = 'TrataTudo bot';
+
 export async function GET(request: Request) {
   try {
     const { searchParams } = new URL(request.url);
@@ -50,39 +52,61 @@ export async function POST(request: Request) {
     const { company_name, phone_e164, bot_instructions } = body;
 
     if (!company_name || !phone_e164) {
-      return NextResponse.json(
-        { ok: false, error: 'Nome da empresa e telefone são obrigatórios' },
-        { status: 400 }
-      );
+      return NextResponse.json({ ok: false, error: 'Nome da empresa e telefone são obrigatórios' }, { status: 400 });
     }
 
-    const trialStart = new Date();
     const trialEnd = new Date();
     trialEnd.setDate(trialEnd.getDate() + 3);
 
-    const { error } = await supabase
+    // 1) Criar cliente
+    const { data: client, error: clientError } = await supabase
       .from('clients')
       .insert([{
         company_name,
         phone_e164,
-        bot_instructions: bot_instructions || 'Olá! Como posso ajudar? 🙂',
+        bot_instructions: bot_instructions || 'Olá! Como posso ajudar?',
         status: 'trial',
-        trial_start: trialStart.toISOString(),
         trial_end: trialEnd.toISOString()
-      }]);
+      }])
+      .select('id')
+      .single();
 
-    if (error) {
-      if (error.code === '23505' || error.message?.toLowerCase().includes('phone_e164')) {
+    if (clientError) {
+      if (clientError.code === '23505' || clientError.message?.includes('phone_e164')) {
         return NextResponse.json({ ok: false, error: 'Este número já está registado.' }, { status: 400 });
       }
-      throw error;
+      throw clientError;
     }
 
-    return NextResponse.json({ ok: true });
+    // 2) Garantir ligação à instância default (TrataTudo bot)
+    // Se já existir por algum motivo, não falha: primeiro verifica.
+    const { data: existing, error: existingError } = await supabase
+      .from('client_instances')
+      .select('id')
+      .eq('client_id', client.id)
+      .limit(1)
+      .maybeSingle();
+
+    if (existingError) throw existingError;
+
+    if (!existing) {
+      const { error: linkError } = await supabase
+        .from('client_instances')
+        .insert([{
+          client_id: client.id,
+          instance_name: DEFAULT_INSTANCE_NAME,
+          is_hub: false,
+          status: 'active'
+        }]);
+
+      if (linkError) throw linkError;
+    }
+
+    return NextResponse.json({ ok: true, id: client.id });
   } catch (error: any) {
     console.error('API Clients POST Error:', error);
     const message =
-      error.code === '23505' || error.message?.toLowerCase().includes('phone_e164')
+      error.code === '23505' || error.message?.includes('phone_e164')
         ? 'Este número já está registado.'
         : error.message;
 
