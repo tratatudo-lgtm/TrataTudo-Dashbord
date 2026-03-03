@@ -19,6 +19,29 @@ function safeStr(v: any) {
   return String(v).trim();
 }
 
+function mergePrompts(systemBase: string, clientPrompt: string) {
+  const base = (systemBase || '').trim();
+  const client = (clientPrompt || '').trim();
+  if (!base && !client) return '';
+  if (!base) return client;
+  if (!client) return base;
+  return `${base}\n\n${client}`;
+}
+
+async function getSystemBasePromptAdmin(supabase: ReturnType<typeof getSupabaseAdmin>) {
+  const { data, error } = await supabase
+    .from('app_config')
+    .select('value')
+    .eq('key', 'SYSTEM_BASE_PROMPT')
+    .maybeSingle();
+
+  if (error) {
+    console.error('getSystemBasePromptAdmin error:', error);
+    return '';
+  }
+  return (data?.value as string) || '';
+}
+
 function formatPlaceSummary(mapsData: any) {
   const name = safeStr(mapsData?.name);
   const address = safeStr(mapsData?.formatted_address);
@@ -33,16 +56,10 @@ function formatPlaceSummary(mapsData: any) {
     ? weekdayText.map((l) => `- ${l}`).join('\n')
     : '- (Horário não disponível no Google)';
 
-  return {
-    name,
-    address,
-    phone,
-    website,
-    hoursBlock,
-  };
+  return { name, address, phone, website, hoursBlock };
 }
 
-function buildPublicServicePrompt(input: {
+function buildPublicServiceClientPrompt(input: {
   entityName: string;
   botName: string;
   place: ReturnType<typeof formatPlaceSummary>;
@@ -50,7 +67,6 @@ function buildPublicServicePrompt(input: {
 }) {
   const { entityName, botName, place, extraRules } = input;
 
-  // Categorias da Junta (podes ajustar depois)
   const complaintCategories = [
     'Manutenção/Obras',
     'Limpeza e Resíduos',
@@ -70,6 +86,9 @@ function buildPublicServicePrompt(input: {
     'Outros atestados (explica qual)',
   ];
 
+  // IMPORTANTE:
+  // - Aqui é só "prompt do cliente" (não inclui blindagem).
+  // - A blindagem vem sempre do SYSTEM_BASE_PROMPT, juntada no runtime.
   return `
 Tu és o **${botName}** 🤝, assistente virtual da **${entityName}**.
 
@@ -79,7 +98,7 @@ Tu és o **${botName}** 🤝, assistente virtual da **${entityName}**.
 - Usa **emojis moderadamente** (não exagerar).
 - Faz **uma pergunta de cada vez** quando precisares de informação.
 - Mantém contexto: não repitas perguntas já respondidas.
-- Se o utilizador pedir algo fora do teu alcance, explica de forma simples e oferece alternativa (ex.: contato/horários).
+- Se o utilizador pedir algo fora do teu alcance, explica de forma simples e oferece alternativa (ex.: contacto/horários).
 
 ## Informações oficiais (usa quando perguntarem)
 - Nome: ${place.name || entityName}
@@ -93,7 +112,7 @@ ${place.hoursBlock}
 1) **Informações gerais**: horários, contactos, localização, serviços e orientações.
 2) **Pedidos à Junta** (ex.: atestados): recolher dados e registar pedido.
 3) **Reclamações/ocorrências**: recolher detalhes e registar ocorrência.
-4) **Estado do pedido**: se o utilizador indicar um código **TT-XXXXXX**, respondes com o estado (ex.: "novo", "em análise", "em resolução", "concluído") e um resumo.
+4) **Estado do pedido**: se o utilizador indicar um código **TT-XXXXXX**, respondes com o estado (ex.: "new", "in_review", "in_progress", "done") e um resumo.
 
 ## Regras de recolha (pedidos e reclamações)
 Quando o utilizador pedir algo do tipo “preciso de atestado”, “quero reclamar”, “há um problema”, etc., faz isto:
@@ -122,8 +141,8 @@ Objetivo: criar um ticket tipo "complaint".
   7. Urgência: baixa / normal / alta
 - Depois confirma em 1 frase e cria ticket.
 
-## Como deves “criar ticket” (integração)
-Quando tiveres dados mínimos, devolve um objeto JSON no formato abaixo (sem markdown), para o sistema gravar no Supabase:
+## Integração (tickets)
+Quando tiveres dados mínimos, devolve APENAS um JSON PURO (sem markdown) para o sistema gravar:
 
 {
   "__REPORT__": true,
@@ -138,20 +157,20 @@ Quando tiveres dados mínimos, devolve um objeto JSON no formato abaixo (sem mar
   "language": "pt-PT"
 }
 
-Depois do sistema gravar, vais receber um tracking_code tipo **TT-123456**.
-Tu deves responder ao utilizador com:
+Depois de gravar, o sistema devolve um tracking_code tipo **TT-123456**.
+Tu respondes ao utilizador:
 - “Feito ✅ Registei o teu pedido com o código **TT-123456**.”
 - “Podes perguntar a qualquer momento: *estado TT-123456*.”
 
 ## Consultar estado (tracking)
 Se o utilizador escrever “estado TT-XXXXXX” ou só enviar “TT-XXXXXX”:
 - Responde curto com o estado e um resumo.
-- Se não existir, diz: “Não encontrei esse código. Confirma se está bem escrito 🙂”.
+- Se não existir: “Não encontrei esse código. Confirma se está bem escrito 🙂”.
 
 ## Comportamento humano
-- Se alguém chegar e disser só “olá”, responde simpático e pergunta o que precisa.
-- Se for pergunta complexa, divide em passos curtos.
-- Nunca inventes horários/serviços. Se não souberes, direciona para o website/telefone.
+- Se disserem “olá”, responde simpático e pergunta o que precisa.
+- Se for complexo, divide em passos curtos.
+- Nunca inventes serviços. Se não souberes, direciona para o website/telefone.
 
 ${extraRules ? `\n## Regras extra\n${extraRules}\n` : ''}
 
@@ -167,7 +186,10 @@ export async function POST(req: Request) {
 
     const body = await req.json();
     const client_id = Number(body.client_id);
-    const save = Boolean(body.save);
+
+    // DEFAULT: grava por defeito (para tu não teres de lembrar de "save:true")
+    const save = body.save === undefined ? true : Boolean(body.save);
+
     const extra_rules = safeStr(body.extra_rules || body.extraRules || '');
 
     if (!client_id) {
@@ -195,44 +217,50 @@ export async function POST(req: Request) {
 
     const place = formatPlaceSummary(client.maps_data);
 
-    // Categoria e capacidades
     const businessCategory = safeStr(client.business_category) || 'OTHER';
     const capabilities = client.capabilities || {};
 
-    // Para já só estamos a focar a Junta (PUBLIC_SERVICE). Outros negócios depois.
-    let draft_prompt = '';
-
+    // 1) Gerar prompt do CLIENTE (sem blindagem)
+    let client_prompt = '';
     if (businessCategory === 'PUBLIC_SERVICE') {
-      draft_prompt = buildPublicServicePrompt({
+      client_prompt = buildPublicServiceClientPrompt({
         entityName,
         botName,
         place,
         extraRules: extra_rules,
       });
     } else {
-      // fallback genérico (para outros negócios)
-      draft_prompt = `
+      client_prompt = `
 Tu és um assistente virtual do negócio **${entityName}** 🙂.
 Fala por tu, respostas curtas e humanas, com emojis moderados.
-Usa estas informações quando perguntarem:
+
+Informação do negócio:
 - Morada: ${place.address || '(não disponível)'}
 - Telefone: ${place.phone || '(não disponível)'}
 - Website: ${place.website || '(não disponível)'}
 - Horário:
 ${place.hoursBlock}
 
-Capacidades do negócio (para o teu comportamento):
+Capacidades (para orientar o comportamento):
 ${JSON.stringify(capabilities)}
 
-Se o utilizador pedir para fazer pedidos/marcações/reclamações, recolhe os dados essenciais e pede confirmação.
+Se o utilizador pedir pedidos/marcações/reclamações:
+faz 1 pergunta de cada vez, recolhe dados essenciais e pede confirmação antes de criar o registo.
 `.trim();
     }
 
+    // 2) Buscar blindagem global
+    const system_base = await getSystemBasePromptAdmin(supabase);
+
+    // 3) Preview final (runtime)
+    const final_prompt_preview = mergePrompts(system_base, client_prompt);
+
+    // 4) Guardar no Supabase APENAS o prompt do cliente (sem blindagem)
     if (save) {
       const { error: uErr } = await supabase
         .from('clients')
         .update({
-          bot_instructions: draft_prompt,
+          bot_instructions: client_prompt,
           updated_at: new Date().toISOString(),
         })
         .eq('id', client_id);
@@ -247,7 +275,10 @@ Se o utilizador pedir para fazer pedidos/marcações/reclamações, recolhe os d
         business_category: businessCategory,
         capabilities,
         saved: save,
-        draft_prompt,
+        client_prompt_len: client_prompt.length,
+        final_prompt_len: final_prompt_preview.length,
+        client_prompt,          // o que fica gravado no clients.bot_instructions
+        final_prompt_preview,   // como vai ficar no runtime (base + client)
       },
     });
   } catch (err: any) {
