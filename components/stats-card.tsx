@@ -13,7 +13,6 @@ export type StatsCardProps = {
   title: string;
   value: React.ReactNode;
   icon: React.ElementType;
-  /** Opcional: se não vier, usamos "indigo" */
   color?: StatsColor;
 };
 
@@ -27,7 +26,8 @@ const COLOR_STYLES: Record<StatsColor, { bg: string; text: string; ring: string 
   slate:  { bg: "bg-slate-50",  text: "text-slate-700",  ring: "ring-slate-200" },
 };
 
-export default function StatsCard({ title, value, icon: Icon, color = "indigo" }: StatsCardProps) {
+// ✅ named export (para: import { StatsCard } from '@/components/stats-card')
+export function StatsCard({ title, value, icon: Icon, color = "indigo" }: StatsCardProps) {
   const c = COLOR_STYLES[color] ?? COLOR_STYLES.indigo;
 
   return (
@@ -45,3 +45,6 @@ export default function StatsCard({ title, value, icon: Icon, color = "indigo" }
     </div>
   );
 }
+
+// ✅ default export (para: import StatsCard from '@/components/stats-card')
+export default StatsCard;
