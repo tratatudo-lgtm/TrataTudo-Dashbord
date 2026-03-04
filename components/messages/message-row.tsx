@@ -1,6 +1,7 @@
 'use client';
 
 import {
+<<<<<<< HEAD
   ArrowUpRight,
   ArrowDownLeft,
   ExternalLink,
@@ -8,6 +9,10 @@ import {
   MessageSquare,
   Copy,
   Check,
+=======
+  ArrowUpRight, ArrowDownLeft, ExternalLink,
+  UserPlus, MessageSquare, Copy, Check
+>>>>>>> 841c8a2 (Fix dashboard clients page and messages mapping)
 } from 'lucide-react';
 import Link from 'next/link';
 import { useMemo, useState } from 'react';
@@ -15,6 +20,7 @@ import { useMemo, useState } from 'react';
 export function MessageRow({ message, clients }: { message: any; clients: any[] }) {
   const [copied, setCopied] = useState(false);
 
+<<<<<<< HEAD
   const msgPhone = String(message?.phone_e164 || message?.phone || message?.number || '').trim();
   const msgInstance = String(message?.instance || message?.instance_name || '').trim();
 
@@ -44,6 +50,20 @@ export function MessageRow({ message, clients }: { message: any; clients: any[] 
   }, [clients, msgInstance, msgPhone]);
 
   const clientId = client?.id ?? client?.client_id ?? null;
+=======
+  const phone = message.phone_e164 || message.phone || '';
+  const instance = message.instance || message.instance_name || '';
+
+  // ✅ Match correto: por instance (ex: "client-6" ou "TrataTudo bot")
+  const client =
+    clients.find(c =>
+      (c.production_instance_name && c.production_instance_name === instance) ||
+      (c.instance_name && c.instance_name === instance)
+    ) || null;
+
+  const clientId = client?.client_id ?? client?.id ?? null;
+  const clientName = client?.company_name ?? 'Desconhecido';
+>>>>>>> 841c8a2 (Fix dashboard clients page and messages mapping)
 
   const copyText = () => {
     navigator.clipboard.writeText(message?.text || '');
@@ -65,6 +85,7 @@ export function MessageRow({ message, clients }: { message: any; clients: any[] 
       </td>
 
       <td className="px-6 py-4">
+<<<<<<< HEAD
         {client && clientId ? (
           <Link
             href={`/app/clients/${clientId}`}
@@ -73,11 +94,30 @@ export function MessageRow({ message, clients }: { message: any; clients: any[] 
             {client.company_name}
             <ExternalLink className="h-3 w-3 opacity-0 group-hover/link:opacity-100 transition-opacity" />
           </Link>
+=======
+        {clientId ? (
+          <>
+            <Link
+              href={`/app/clients/${clientId}`}
+              className="flex items-center gap-2 text-indigo-600 hover:text-indigo-700 font-semibold group/link"
+            >
+              {clientName}
+              <ExternalLink className="h-3 w-3 opacity-0 group-hover/link:opacity-100 transition-opacity" />
+            </Link>
+            <div className="text-[10px] text-slate-400 font-mono mt-0.5">
+              Instância: {instance || '-'}
+            </div>
+          </>
+>>>>>>> 841c8a2 (Fix dashboard clients page and messages mapping)
         ) : (
           <div className="flex items-center gap-2 text-slate-400 italic text-xs">
             Desconhecido
             <Link
+<<<<<<< HEAD
               href={`/app/clients?q=${encodeURIComponent(msgPhone || '')}`}
+=======
+              href={`/app/clients?q=${encodeURIComponent(phone)}`}
+>>>>>>> 841c8a2 (Fix dashboard clients page and messages mapping)
               className="p-1 rounded bg-slate-100 text-slate-600 hover:bg-indigo-100 hover:text-indigo-700 transition"
               title="Criar/Procurar cliente por este número"
             >
@@ -86,11 +126,15 @@ export function MessageRow({ message, clients }: { message: any; clients: any[] 
           </div>
         )}
 
+<<<<<<< HEAD
         <div className="text-[10px] text-slate-400 font-mono mt-0.5">{msgPhone || '-'}</div>
 
         {msgInstance && (
           <div className="text-[9px] text-slate-400 font-mono mt-1">Instância: {msgInstance}</div>
         )}
+=======
+        <div className="text-[10px] text-slate-400 font-mono mt-0.5">{phone}</div>
+>>>>>>> 841c8a2 (Fix dashboard clients page and messages mapping)
       </td>
 
       <td className="px-6 py-4">
@@ -116,6 +160,14 @@ export function MessageRow({ message, clients }: { message: any; clients: any[] 
           <p className="text-slate-700 line-clamp-2 text-xs leading-relaxed" title={message.text}>
             {message.text}
           </p>
+<<<<<<< HEAD
+=======
+          {instance && (
+            <span className="text-[9px] text-slate-400 font-mono mt-1 block">
+              Instância: {instance}
+            </span>
+          )}
+>>>>>>> 841c8a2 (Fix dashboard clients page and messages mapping)
         </div>
       </td>
 
@@ -128,7 +180,10 @@ export function MessageRow({ message, clients }: { message: any; clients: any[] 
           >
             {copied ? <Check className="h-4 w-4 text-emerald-500" /> : <Copy className="h-4 w-4" />}
           </button>
+<<<<<<< HEAD
 
+=======
+>>>>>>> 841c8a2 (Fix dashboard clients page and messages mapping)
           <button
             className="p-1.5 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 rounded-lg transition"
             title="Ver Detalhes"
