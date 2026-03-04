@@ -17,6 +17,7 @@ function isServiceActive(client: any) {
   const status = String(client.status || '').toLowerCase();
   if (status === 'expired') return false;
 
+  // trial precisa de trial_end no futuro
   if (status === 'trial') {
     if (!client.trial_end) return false;
     const end = new Date(client.trial_end);
@@ -24,6 +25,7 @@ function isServiceActive(client: any) {
     return end.getTime() > Date.now();
   }
 
+  // active: se tiver trial_end, respeita; se não tiver, assume ok
   if (status === 'active') {
     if (!client.trial_end) return true;
     const end = new Date(client.trial_end);
@@ -39,7 +41,7 @@ function safeStr(v: any) {
   return String(v).trim();
 }
 
-// tenta extrair JSON __REPORT__ sem rebentar
+// tenta extrair JSON __REPORT__ sem rebentar (mesmo que venha texto à volta)
 function extractJsonReport(text: string) {
   try {
     const start = text.indexOf('{');
@@ -54,14 +56,6 @@ function extractJsonReport(text: string) {
   }
 }
 
-// pega no primeiro nome (para tratar pelo nome sem ser estranho)
-function firstName(full: string) {
-  const s = safeStr(full);
-  if (!s) return '';
-  const parts = s.split(/\s+/).filter(Boolean);
-  return parts[0] || '';
-}
-
 export async function POST(req: Request) {
   try {
     const supabase = createClient();
@@ -69,6 +63,7 @@ export async function POST(req: Request) {
     // Auth: API key (server-to-server) OU sessão (dashboard)
     const apiKeyOk = isValidApiKey(req);
     const { data: { session } } = await supabase.auth.getSession();
+
     if (!apiKeyOk && !session) {
       return NextResponse.json({ ok: false, error: 'Não autorizado' }, { status: 401 });
     }
@@ -79,8 +74,8 @@ export async function POST(req: Request) {
     const phone_e164 = safeStr(body.phone_e164);
     const text = safeStr(body.text);
 
-    // ✅ nome WhatsApp (Evolution costuma chamar pushName)
-    const pushName = safeStr(body.push_name || body.pushName || body.contact_name || body.name);
+    // nome do whatsapp (Evolution): pushName / push_name
+    const push_name = safeStr(body.push_name || body.pushName || '');
 
     if (!client_id || !phone_e164 || !text) {
       return NextResponse.json(
@@ -95,6 +90,7 @@ export async function POST(req: Request) {
       .select('id, status, trial_end, bot_instructions, company_name, instance_name')
       .eq('id', client_id)
       .single();
+
     if (cErr) throw cErr;
 
     // 🚫 BLOQUEIO POR STATUS + DATA
@@ -114,6 +110,7 @@ export async function POST(req: Request) {
     // 🔹 Prompt final = base + cliente
     const base = await getSystemBasePrompt();
     const finalPrompt = mergePrompts(base, client?.bot_instructions || '');
+
     if (!finalPrompt) {
       return NextResponse.json(
         { ok: false, error: 'Prompt vazio. Define SYSTEM_BASE_PROMPT ou bot_instructions.' },
@@ -123,14 +120,14 @@ export async function POST(req: Request) {
 
     const groqKey = process.env.GROQ_API_KEY || '';
     const model = process.env.GROQ_MODEL || 'llama-3.1-8b-instant';
+
     if (!groqKey) {
       return NextResponse.json({ ok: false, error: 'GROQ_API_KEY em falta' }, { status: 500 });
     }
 
-    // ✅ HISTÓRICO: últimas 20 mensagens desta pessoa nesta instância
+    // ✅ HISTÓRICO: últimas 12 mensagens desta pessoa nesta instância
     const instance = safeStr(client.instance_name);
-    let historyMsgs: any[] = [];
-    let hasHistory = false;
+    let historyMsgs: Array<{ role: 'user' | 'assistant'; content: string }> = [];
 
     if (instance) {
       const { data: hist, error: hErr } = await supabase
@@ -139,10 +136,9 @@ export async function POST(req: Request) {
         .eq('phone_e164', phone_e164)
         .eq('instance', instance)
         .order('created_at', { ascending: false })
-        .limit(20);
+        .limit(12);
 
-      if (!hErr && Array.isArray(hist) && hist.length > 0) {
-        hasHistory = true;
+      if (!hErr && Array.isArray(hist)) {
         historyMsgs = hist
           .slice()
           .reverse()
@@ -154,30 +150,19 @@ export async function POST(req: Request) {
       }
     }
 
-    // ✅ Anti-"Olá" quando já existe conversa
-    // (Isto resolve o comportamento de repetir "Olá!" em cada mensagem.)
-    const antiGreetingRule = hasHistory
-      ? `REGRAS IMPORTANTES (APLICA NESTA RESPOSTA):
-- Já existe conversa anterior com este utilizador. NÃO voltes a cumprimentar ("Olá", "Boa noite", etc.).
-- Responde diretamente ao que o utilizador pediu agora.
-- Mantém o contexto e continua a conversa naturalmente.`
-      : '';
+    // 🚀 Montar mensagens para o Groq (system + (opcional) nome + histórico + user)
+    const messages: any[] = [{ role: 'system', content: finalPrompt }];
 
-    // ✅ Nome (se existir) para tratar pelo nome
-    const userName = firstName(pushName);
-    const nameRule = userName
-      ? `CONTEXTO DO UTILIZADOR:
-- Nome no WhatsApp: "${userName}". Trata pelo primeiro nome quando fizer sentido, sem exagerar.`
-      : '';
+    // Nota curta para tratar pelo nome quando existir (sem saudações)
+    if (push_name) {
+      messages.push({
+        role: 'system',
+        content: `Nome do utilizador (WhatsApp): ${push_name}. Usa este nome de forma natural 1 vez de vez em quando (não em todas as mensagens).`
+      });
+    }
 
-    // 🚀 Chamar Groq com contexto
-    const messages = [
-      { role: 'system', content: finalPrompt },
-      ...(nameRule ? [{ role: 'system', content: nameRule }] : []),
-      ...(antiGreetingRule ? [{ role: 'system', content: antiGreetingRule }] : []),
-      ...historyMsgs,
-      { role: 'user', content: text },
-    ];
+    messages.push(...historyMsgs);
+    messages.push({ role: 'user', content: text });
 
     const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
       method: 'POST',
@@ -192,13 +177,13 @@ export async function POST(req: Request) {
       }),
     });
 
-    const raw = await res.text();
+    const rawText = await res.text();
     let data: any;
-    try { data = JSON.parse(raw); } catch { data = null; }
+    try { data = JSON.parse(rawText); } catch { data = null; }
 
     if (!res.ok || !data) {
       return NextResponse.json(
-        { ok: false, error: 'Erro ao chamar Groq', debug: raw?.slice(0, 500) },
+        { ok: false, error: 'Erro ao chamar Groq', debug: rawText?.slice(0, 500) },
         { status: 500 }
       );
     }
@@ -212,14 +197,14 @@ export async function POST(req: Request) {
         instance,
         direction: 'in',
         text,
-        raw: { source: 'api/bot/reply', client_id, push_name: pushName || null },
+        raw: { source: 'api/bot/reply', client_id, push_name: push_name || null },
       },
       {
         phone_e164,
         instance,
         direction: 'out',
         text: reply,
-        raw: { model, source: 'groq', push_name: pushName || null },
+        raw: { model, source: 'groq', push_name: push_name || null },
       },
     ]);
 
@@ -249,6 +234,9 @@ export async function POST(req: Request) {
     });
   } catch (err: any) {
     console.error('BOT REPLY error:', err);
-    return NextResponse.json({ ok: false, error: err?.message || 'Erro interno' }, { status: 500 });
+    return NextResponse.json(
+      { ok: false, error: err?.message || 'Erro interno' },
+      { status: 500 }
+    );
   }
 }
