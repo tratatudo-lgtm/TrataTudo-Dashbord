@@ -54,6 +54,30 @@ function extractJsonReport(text: string) {
   }
 }
 
+// Anti "olá" repetido (GLOBAL - para todos os clientes)
+// - Só podes cumprimentar/apresentar 1x na primeira interação.
+// - Se já houver histórico, responde direto e fluido sem recomeçar a conversa.
+function addAntiGreetingRules(systemPrompt: string, hasHistory: boolean, pushName?: string) {
+  const name = safeStr(pushName);
+  const who = name ? `O nome do utilizador é "${name}". Se fizer sentido, trata-o pelo nome.` : '';
+
+  const base = `
+## Regras globais anti-repetição (OBRIGATÓRIO)
+- NÃO recomeças a conversa com "Olá", "Bom dia", "Boa tarde", "Boa noite", nem "Sou o ..." em todas as mensagens.
+- Só podes fazer a saudação inicial 1 vez (na primeira interação com este utilizador).
+- Se já existir histórico, continua a conversa de forma direta e humana, mantendo contexto.
+${who}
+`.trim();
+
+  const hasHist = `
+## Histórico existente
+- Já existe histórico desta conversa. É PROIBIDO voltares a apresentar-te ou repetir saudações.
+`.trim();
+
+  return [String(systemPrompt||'').trim(), base, hasHistory ? hasHist : ''].filter(Boolean).join('\n\n');
+}
+
+
 // 🔒 Remove saudações repetidas no início (quando já há histórico)
 function stripRepeatedGreeting(reply: string) {
   let s = safeStr(reply);
@@ -228,7 +252,7 @@ export async function POST(req: Request) {
         instance,
         direction: 'out',
         text: reply,
-        raw: { model, source: 'groq' },
+        raw: { model, source: 'groq', push_name },
       },
     ]);
 
