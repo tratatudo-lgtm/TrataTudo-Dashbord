@@ -17,7 +17,6 @@ function isServiceActive(client: any) {
   const status = String(client.status || '').toLowerCase();
   if (status === 'expired') return false;
 
-  // trial precisa de trial_end no futuro
   if (status === 'trial') {
     if (!client.trial_end) return false;
     const end = new Date(client.trial_end);
@@ -25,7 +24,6 @@ function isServiceActive(client: any) {
     return end.getTime() > Date.now();
   }
 
-  // active: se tiver trial_end, respeita; se não tiver, assume ok
   if (status === 'active') {
     if (!client.trial_end) return true;
     const end = new Date(client.trial_end);
@@ -56,6 +54,14 @@ function extractJsonReport(text: string) {
   }
 }
 
+// pega no primeiro nome (para tratar pelo nome sem ser estranho)
+function firstName(full: string) {
+  const s = safeStr(full);
+  if (!s) return '';
+  const parts = s.split(/\s+/).filter(Boolean);
+  return parts[0] || '';
+}
+
 export async function POST(req: Request) {
   try {
     const supabase = createClient();
@@ -68,9 +74,13 @@ export async function POST(req: Request) {
     }
 
     const body = await req.json();
+
     const client_id = Number(body.client_id);
     const phone_e164 = safeStr(body.phone_e164);
     const text = safeStr(body.text);
+
+    // ✅ nome WhatsApp (Evolution costuma chamar pushName)
+    const pushName = safeStr(body.push_name || body.pushName || body.contact_name || body.name);
 
     if (!client_id || !phone_e164 || !text) {
       return NextResponse.json(
@@ -79,7 +89,7 @@ export async function POST(req: Request) {
       );
     }
 
-    // 🔎 Buscar cliente (precisamos de instance_name p/ histórico)
+    // 🔎 Buscar cliente
     const { data: client, error: cErr } = await supabase
       .from('clients')
       .select('id, status, trial_end, bot_instructions, company_name, instance_name')
@@ -101,7 +111,7 @@ export async function POST(req: Request) {
       );
     }
 
-    // 🔹 Prompt final = base + cliente (base tem regra anti-saudação)
+    // 🔹 Prompt final = base + cliente
     const base = await getSystemBasePrompt();
     const finalPrompt = mergePrompts(base, client?.bot_instructions || '');
     if (!finalPrompt) {
@@ -117,9 +127,11 @@ export async function POST(req: Request) {
       return NextResponse.json({ ok: false, error: 'GROQ_API_KEY em falta' }, { status: 500 });
     }
 
-    // ✅ HISTÓRICO: últimas 12 mensagens desta pessoa nesta instância
+    // ✅ HISTÓRICO: últimas 20 mensagens desta pessoa nesta instância
     const instance = safeStr(client.instance_name);
     let historyMsgs: any[] = [];
+    let hasHistory = false;
+
     if (instance) {
       const { data: hist, error: hErr } = await supabase
         .from('wa_messages')
@@ -127,9 +139,10 @@ export async function POST(req: Request) {
         .eq('phone_e164', phone_e164)
         .eq('instance', instance)
         .order('created_at', { ascending: false })
-        .limit(12);
+        .limit(20);
 
-      if (!hErr && Array.isArray(hist)) {
+      if (!hErr && Array.isArray(hist) && hist.length > 0) {
+        hasHistory = true;
         historyMsgs = hist
           .slice()
           .reverse()
@@ -141,9 +154,27 @@ export async function POST(req: Request) {
       }
     }
 
+    // ✅ Anti-"Olá" quando já existe conversa
+    // (Isto resolve o comportamento de repetir "Olá!" em cada mensagem.)
+    const antiGreetingRule = hasHistory
+      ? `REGRAS IMPORTANTES (APLICA NESTA RESPOSTA):
+- Já existe conversa anterior com este utilizador. NÃO voltes a cumprimentar ("Olá", "Boa noite", etc.).
+- Responde diretamente ao que o utilizador pediu agora.
+- Mantém o contexto e continua a conversa naturalmente.`
+      : '';
+
+    // ✅ Nome (se existir) para tratar pelo nome
+    const userName = firstName(pushName);
+    const nameRule = userName
+      ? `CONTEXTO DO UTILIZADOR:
+- Nome no WhatsApp: "${userName}". Trata pelo primeiro nome quando fizer sentido, sem exagerar.`
+      : '';
+
     // 🚀 Chamar Groq com contexto
     const messages = [
       { role: 'system', content: finalPrompt },
+      ...(nameRule ? [{ role: 'system', content: nameRule }] : []),
+      ...(antiGreetingRule ? [{ role: 'system', content: antiGreetingRule }] : []),
       ...historyMsgs,
       { role: 'user', content: text },
     ];
@@ -181,14 +212,14 @@ export async function POST(req: Request) {
         instance,
         direction: 'in',
         text,
-        raw: { source: 'api/bot/reply', client_id },
+        raw: { source: 'api/bot/reply', client_id, push_name: pushName || null },
       },
       {
         phone_e164,
         instance,
         direction: 'out',
         text: reply,
-        raw: { model, source: 'groq' },
+        raw: { model, source: 'groq', push_name: pushName || null },
       },
     ]);
 
