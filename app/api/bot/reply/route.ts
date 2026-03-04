@@ -9,20 +9,31 @@ function isValidApiKey(req: Request) {
 }
 
 // ✅ Trial: válido até trial_end
-// ✅ Active: válido; se tiver trial_end, respeita; se não tiver trial_end, assume pago (não expira aqui)
+// ✅ Active: válido; se tiver trial_end, respeita; se não tiver, assume pago (não expira aqui)
 // ❌ Expired: bloqueia
 function isServiceActive(client: any) {
   if (!client) return false;
+
   const status = String(client.status || '').toLowerCase();
   if (status === 'expired') return false;
 
-  const trialEnd = client.trial_end ? new Date(client.trial_end) : null;
-  if (trialEnd && !isNaN(trialEnd.getTime())) {
-    return trialEnd.getTime() > Date.now();
+  // trial precisa de trial_end no futuro
+  if (status === 'trial') {
+    if (!client.trial_end) return false;
+    const end = new Date(client.trial_end);
+    if (isNaN(end.getTime())) return false;
+    return end.getTime() > Date.now();
   }
 
-  // active sem trial_end => pago (não expira aqui)
-  return status === 'active';
+  // active: se tiver trial_end, respeita; se não tiver, assume ok
+  if (status === 'active') {
+    if (!client.trial_end) return true;
+    const end = new Date(client.trial_end);
+    if (isNaN(end.getTime())) return true;
+    return end.getTime() > Date.now();
+  }
+
+  return false;
 }
 
 function safeStr(v: any) {
@@ -30,16 +41,14 @@ function safeStr(v: any) {
   return String(v).trim();
 }
 
-// Extrai JSON de report quando o modelo devolver { "__REPORT__": true, ... }
+// tenta extrair JSON __REPORT__ sem rebentar
 function extractJsonReport(text: string) {
-  if (!text) return null;
-  const start = text.indexOf('{');
-  const end = text.lastIndexOf('}');
-  if (start === -1 || end === -1 || end <= start) return null;
-
-  const slice = text.slice(start, end + 1);
   try {
-    const obj = JSON.parse(slice);
+    const start = text.indexOf('{');
+    const end = text.lastIndexOf('}');
+    if (start === -1 || end === -1 || end <= start) return null;
+    const chunk = text.slice(start, end + 1);
+    const obj = JSON.parse(chunk);
     if (obj && obj.__REPORT__ === true) return obj;
     return null;
   } catch {
@@ -60,8 +69,8 @@ export async function POST(req: Request) {
 
     const body = await req.json();
     const client_id = Number(body.client_id);
-    const phone_e164 = safeStr(body.phone_e164 || '');
-    const text = safeStr(body.text || '');
+    const phone_e164 = safeStr(body.phone_e164);
+    const text = safeStr(body.text);
 
     if (!client_id || !phone_e164 || !text) {
       return NextResponse.json(
@@ -70,16 +79,15 @@ export async function POST(req: Request) {
       );
     }
 
-    // 🔎 Buscar cliente
+    // 🔎 Buscar cliente (precisamos de instance_name p/ histórico)
     const { data: client, error: cErr } = await supabase
       .from('clients')
       .select('id, status, trial_end, bot_instructions, company_name, instance_name')
       .eq('id', client_id)
       .single();
-
     if (cErr) throw cErr;
 
-    // 🚫 BLOQUEIO POR STATUS + DATA (trial_end)
+    // 🚫 BLOQUEIO POR STATUS + DATA
     if (!isServiceActive(client)) {
       return NextResponse.json(
         {
@@ -93,7 +101,7 @@ export async function POST(req: Request) {
       );
     }
 
-    // 🔹 Prompt final (base + client)
+    // 🔹 Prompt final = base + cliente (base tem regra anti-saudação)
     const base = await getSystemBasePrompt();
     const finalPrompt = mergePrompts(base, client?.bot_instructions || '');
     if (!finalPrompt) {
@@ -109,42 +117,37 @@ export async function POST(req: Request) {
       return NextResponse.json({ ok: false, error: 'GROQ_API_KEY em falta' }, { status: 500 });
     }
 
-    const instanceName = safeStr(client?.instance_name) || `client-${client_id}`;
+    // ✅ HISTÓRICO: últimas 12 mensagens desta pessoa nesta instância
+    const instance = safeStr(client.instance_name);
+    let historyMsgs: any[] = [];
+    if (instance) {
+      const { data: hist, error: hErr } = await supabase
+        .from('wa_messages')
+        .select('direction, text, created_at')
+        .eq('phone_e164', phone_e164)
+        .eq('instance', instance)
+        .order('created_at', { ascending: false })
+        .limit(12);
 
-    // ✅ 1) Buscar histórico (últimas 10 mensagens) para dar contexto e parar de repetir
-    const { data: history, error: hErr } = await supabase
-      .from('wa_messages')
-      .select('direction, text')
-      .eq('phone_e164', phone_e164)
-      .eq('instance', instanceName)
-      .order('created_at', { ascending: false })
-      .limit(10);
-
-    if (hErr) {
-      console.error('History fetch error:', hErr);
+      if (!hErr && Array.isArray(hist)) {
+        historyMsgs = hist
+          .slice()
+          .reverse()
+          .map((m: any) => ({
+            role: m.direction === 'out' ? 'assistant' : 'user',
+            content: safeStr(m.text),
+          }))
+          .filter((m: any) => m.content.length > 0);
+      }
     }
 
-    const historyMessages =
-      (history || [])
-        .reverse()
-        .map((m: any) => ({
-          role: m.direction === 'in' ? 'user' : 'assistant',
-          content: safeStr(m.text),
-        }))
-        .filter((m: any) => m.content);
+    // 🚀 Chamar Groq com contexto
+    const messages = [
+      { role: 'system', content: finalPrompt },
+      ...historyMsgs,
+      { role: 'user', content: text },
+    ];
 
-    // ✅ 2) Guardar a mensagem IN antes de chamar o Groq
-    const { error: inErr } = await supabase.from('wa_messages').insert([{
-      phone_e164,
-      instance: instanceName,
-      direction: 'in',
-      text,
-      raw: { source: 'api/bot/reply', client_id },
-    }]);
-
-    if (inErr) console.error('Insert IN error:', inErr);
-
-    // ✅ 3) Chamar Groq com prompt + histórico + mensagem atual
     const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
       method: 'POST',
       headers: {
@@ -154,72 +157,67 @@ export async function POST(req: Request) {
       body: JSON.stringify({
         model,
         temperature: 0.2,
-        messages: [
-          { role: 'system', content: finalPrompt },
-          ...historyMessages,
-          { role: 'user', content: text },
-        ],
+        messages,
       }),
     });
 
-    const rawText = await res.text();
-    let data: any = null;
-    try { data = JSON.parse(rawText); } catch { data = null; }
+    const raw = await res.text();
+    let data: any;
+    try { data = JSON.parse(raw); } catch { data = null; }
 
     if (!res.ok || !data) {
       return NextResponse.json(
-        { ok: false, error: 'Erro ao chamar Groq', debug: rawText?.slice(0, 500) },
+        { ok: false, error: 'Erro ao chamar Groq', debug: raw?.slice(0, 500) },
         { status: 500 }
       );
     }
 
     const reply = safeStr(data?.choices?.[0]?.message?.content || '');
 
-    // ✅ 4) Guardar OUT
-    const { error: outErr } = await supabase.from('wa_messages').insert([{
-      phone_e164,
-      instance: instanceName,
-      direction: 'out',
-      text: reply,
-      raw: { model, source: 'groq' },
-    }]);
+    // 💾 Guardar mensagens (IN e OUT)
+    await supabase.from('wa_messages').insert([
+      {
+        phone_e164,
+        instance,
+        direction: 'in',
+        text,
+        raw: { source: 'api/bot/reply', client_id },
+      },
+      {
+        phone_e164,
+        instance,
+        direction: 'out',
+        text: reply,
+        raw: { model, source: 'groq' },
+      },
+    ]);
 
-    if (outErr) console.error('Insert OUT error:', outErr);
-
-    // ✅ 5) Se vier __REPORT__, tenta gravar ticket (não falha o reply se der erro)
+    // ✅ Se vier __REPORT__, cria ticket
     const report = extractJsonReport(reply);
     if (report) {
-      try {
-        await supabase.from('tickets').insert([{
-          client_id,
-          kind: report.type === 'complaint' ? 'complaint' : 'request',
-          category: safeStr(report.category),
-          subject: null,
-          description: safeStr(report.description),
-          priority: report.urgency === 'high' ? 'high' : report.urgency === 'low' ? 'low' : 'normal',
-          status: 'new',
-          customer_name: safeStr(report.citizen_name),
-          customer_contact: safeStr(report.citizen_contact),
-          location_text: safeStr(report.location_text),
-          channel: safeStr(report.channel || 'whatsapp'),
-          metadata: { language: safeStr(report.language || 'pt-PT') },
-          raw: report,
-        }]);
-      } catch (e) {
-        console.error('Ticket insert error:', e);
-      }
+      await supabase.from('tickets').insert([{
+        client_id,
+        kind: report.type === 'complaint' ? 'complaint' : 'request',
+        category: safeStr(report.category),
+        subject: null,
+        description: safeStr(report.description),
+        priority: report.urgency === 'high' ? 'high' : report.urgency === 'low' ? 'low' : 'normal',
+        status: 'new',
+        customer_name: safeStr(report.citizen_name),
+        customer_contact: safeStr(report.citizen_contact),
+        location_text: safeStr(report.location_text),
+        channel: safeStr(report.channel || 'whatsapp'),
+        metadata: { language: safeStr(report.language || 'pt-PT') },
+        raw: report,
+      }]);
     }
 
     return NextResponse.json({
       ok: true,
       data: { client_id, phone_e164, reply }
     });
-
   } catch (err: any) {
     console.error('BOT REPLY error:', err);
-    return NextResponse.json(
-      { ok: false, error: err?.message || 'Erro interno' },
-      { status: 500 }
-    );
+    return NextResponse.json({ ok: false, error: err?.message || 'Erro interno' }, { status: 500 });
   }
 }
