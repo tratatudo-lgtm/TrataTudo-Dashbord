@@ -8,9 +8,9 @@ function isValidApiKey(req: Request) {
   return expected.length > 0 && key === expected;
 }
 
-// ✅ Trial: válido até trial_end
-// ✅ Active: válido; se tiver trial_end respeita; se não tiver assume pago (não expira aqui)
-// ❌ Expired: bloqueia
+// ✅  Trial: válido até trial_end
+// ✅  Active: válido; se tiver trial_end, respeita; se não tiver, assume pago (não expira aqui)
+// ❌  Expired: bloqueia
 function isServiceActive(client: any) {
   if (!client) return false;
 
@@ -25,7 +25,7 @@ function isServiceActive(client: any) {
   }
 
   if (status === 'active') {
-    if (!client.trial_end) return true;
+    if (!client.trial_end) return true; // pago
     const end = new Date(client.trial_end);
     if (isNaN(end.getTime())) return true;
     return end.getTime() > Date.now();
@@ -39,45 +39,50 @@ function safeStr(v: any) {
   return String(v).trim();
 }
 
-/**
- * Procura um bloco JSON que contenha "__REPORT__": true,
- * devolve:
- *  - clean: texto sem o JSON (para enviar ao WhatsApp)
- *  - report: objeto (para criar ticket)
- */
-function extractAndStripReport(fullText: string) {
-  const text = safeStr(fullText);
-  const marker = '"__REPORT__"';
-  const markerPos = text.indexOf(marker);
-
-  if (markerPos === -1) return { clean: text, report: null };
-
-  const start = text.lastIndexOf('{', markerPos);
-  const end = text.indexOf('}', markerPos);
-
-  if (start === -1 || end === -1 || end <= start) {
-    return { clean: text, report: null };
-  }
-
-  const chunk = text.slice(start, end + 1);
-
-  let obj: any = null;
+// tenta extrair JSON __REPORT__ (mesmo se vier misturado no texto)
+function extractJsonReport(text: string) {
   try {
-    obj = JSON.parse(chunk);
+    const start = text.indexOf('{');
+    const end = text.lastIndexOf('}');
+    if (start === -1 || end === -1 || end <= start) return null;
+    const chunk = text.slice(start, end + 1);
+    const obj = JSON.parse(chunk);
+    if (obj && obj.__REPORT__ === true) return obj;
+    return null;
   } catch {
-    obj = null;
+    return null;
   }
+}
 
-  // remove o JSON do reply para não aparecer no chat
-  const clean = safeStr(
-    (text.slice(0, start).trimEnd() + '\n' + text.slice(end + 1).trimStart()).trim()
-  );
-
-  if (obj && obj.__REPORT__ === true) {
-    return { clean, report: obj };
+// remove qualquer bloco JSON do texto (para nunca aparecer __REPORT__/debug no WhatsApp)
+function stripJsonBlocks(text: string) {
+  const s = safeStr(text);
+  if (!s) return '';
+  const start = s.indexOf('{');
+  const end = s.lastIndexOf('}');
+  if (start !== -1 && end !== -1 && end > start) {
+    const before = s.slice(0, start).trim();
+    const after = s.slice(end + 1).trim();
+    return [before, after].filter(Boolean).join('\n').trim();
   }
+  return s;
+}
 
-  return { clean, report: null };
+// evita “olá / bem-vindo” repetido quando já existe histórico
+function enforceNoRepeatGreeting(reply: string, hasHistory: boolean) {
+  const r = safeStr(reply);
+  if (!hasHistory) return r;
+
+  const norm = r.toLowerCase();
+  const looksLikeGreetingOnly =
+    norm.length < 90 &&
+    (norm.includes('olá') || norm.includes('ola') || norm.includes('bem-vindo') || norm.includes('bem vindo')) &&
+    (norm.includes('como posso ajudar') || norm.includes('em que posso ajudar') || norm.includes('o que precisas'));
+
+  if (looksLikeGreetingOnly) {
+    return 'Diz-me só o que precisas e eu trato disso contigo 🙂';
+  }
+  return r;
 }
 
 export async function POST(req: Request) {
@@ -86,7 +91,10 @@ export async function POST(req: Request) {
 
     // Auth: API key (server-to-server) OU sessão (dashboard)
     const apiKeyOk = isValidApiKey(req);
-    const { data: { session } } = await supabase.auth.getSession();
+    const {
+      data: { session },
+    } = await supabase.auth.getSession();
+
     if (!apiKeyOk && !session) {
       return NextResponse.json({ ok: false, error: 'Não autorizado' }, { status: 401 });
     }
@@ -96,7 +104,9 @@ export async function POST(req: Request) {
     const client_id = Number(body.client_id);
     const phone_e164 = safeStr(body.phone_e164);
     const text = safeStr(body.text);
-    const push_name = safeStr(body.push_name);
+
+    // nome do WhatsApp (quando vier do webhook / api)
+    const push_name = safeStr(body.push_name || body.pushName || '');
 
     if (!client_id || !phone_e164 || !text) {
       return NextResponse.json(
@@ -114,7 +124,7 @@ export async function POST(req: Request) {
 
     if (cErr) throw cErr;
 
-    // 🚫 Bloqueio por status + data
+    // 🚫 BLOQUEIO POR STATUS + DATA
     if (!isServiceActive(client)) {
       return NextResponse.json(
         {
@@ -131,6 +141,7 @@ export async function POST(req: Request) {
     // 🔹 Prompt final
     const base = await getSystemBasePrompt();
     const finalPrompt = mergePrompts(base, client?.bot_instructions || '');
+
     if (!finalPrompt) {
       return NextResponse.json(
         { ok: false, error: 'Prompt vazio. Define SYSTEM_BASE_PROMPT ou bot_instructions.' },
@@ -139,11 +150,56 @@ export async function POST(req: Request) {
     }
 
     const groqKey = process.env.GROQ_API_KEY || '';
-    const model = process.env.GROQ_MODEL || 'llama-3.3-70b-versatile';
+    const model = process.env.GROQ_MODEL || 'llama-3.1-8b-instant';
 
     if (!groqKey) {
       return NextResponse.json({ ok: false, error: 'GROQ_API_KEY em falta' }, { status: 500 });
     }
+
+    // ✅ HISTÓRICO: últimas 12 mensagens desta pessoa nesta instância
+    const instance = safeStr(client.instance_name);
+    let historyMsgs: Array<{ role: 'user' | 'assistant'; content: string }> = [];
+
+    if (instance) {
+      const { data: hist, error: hErr } = await supabase
+        .from('wa_messages')
+        .select('direction, text, created_at')
+        .eq('phone_e164', phone_e164)
+        .eq('instance', instance)
+        .order('created_at', { ascending: false })
+        .limit(12);
+
+      if (!hErr && Array.isArray(hist)) {
+        historyMsgs = hist
+          .slice()
+          .reverse()
+          .map((m: any) => ({
+            role: m.direction === 'out' ? 'assistant' : 'user',
+            content: safeStr(m.text),
+          }))
+          .filter((m) => m.content.length > 0);
+      }
+    }
+
+    const hasHistory = historyMsgs.length > 0;
+
+    // 🔒 Regras técnicas extras (nome WhatsApp + anti-saudação + anti-JSON)
+    const systemWithContext = `
+${finalPrompt}
+
+# Regras técnicas (OBRIGATÓRIO)
+- O utilizador chama-se: ${push_name ? push_name : '(desconhecido)'}.
+- Se já houver conversa (histórico), NÃO voltes a dizer "olá", "bem-vindo", nem mensagens de apresentação. Vai direto ao assunto.
+- NUNCA mostres JSON, nem blocos técnicos, nem "__REPORT__" ao utilizador.
+- Se precisares de criar ticket, podes gerar um JSON __REPORT__, mas ele NÃO deve aparecer na mensagem ao utilizador.
+`.trim();
+
+    // 🚀 Chamar Groq com contexto
+    const messages = [
+      { role: 'system' as const, content: systemWithContext },
+      ...historyMsgs,
+      { role: 'user' as const, content: text },
+    ];
 
     const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
       method: 'POST',
@@ -154,16 +210,17 @@ export async function POST(req: Request) {
       body: JSON.stringify({
         model,
         temperature: 0.2,
-        messages: [
-          { role: 'system', content: finalPrompt },
-          { role: 'user', content: text },
-        ],
+        messages,
       }),
     });
 
     const raw = await res.text();
-    let data: any = null;
-    try { data = JSON.parse(raw); } catch { data = null; }
+    let data: any;
+    try {
+      data = JSON.parse(raw);
+    } catch {
+      data = null;
+    }
 
     if (!res.ok || !data) {
       return NextResponse.json(
@@ -172,12 +229,14 @@ export async function POST(req: Request) {
       );
     }
 
-    const fullReply = safeStr(data?.choices?.[0]?.message?.content || '');
-    const { clean: replyClean, report } = extractAndStripReport(fullReply);
+    const replyRaw = safeStr(data?.choices?.[0]?.message?.content || '');
+    const report = extractJsonReport(replyRaw);
 
-    const instance = safeStr(client.instance_name);
+    // texto “limpo” para o utilizador (sem JSON)
+    let replyUser = stripJsonBlocks(replyRaw);
+    replyUser = enforceNoRepeatGreeting(replyUser, hasHistory);
 
-    // 💾 Guardar mensagens (IN e OUT) — OUT guarda já o texto LIMPO (sem JSON)
+    // 💾 Guardar mensagens (IN e OUT) — OUT sempre “limpo”
     await supabase.from('wa_messages').insert([
       {
         phone_e164,
@@ -190,35 +249,51 @@ export async function POST(req: Request) {
         phone_e164,
         instance,
         direction: 'out',
-        text: replyClean,
+        text: replyUser,
         raw: { model, source: 'groq', push_name },
       },
     ]);
 
-    // ✅ Se veio __REPORT__, criar ticket (mas sem mostrar o JSON no WhatsApp)
+    // ✅ Se vier __REPORT__, cria ticket (e devolve código ao utilizador)
     if (report) {
-      await supabase.from('tickets').insert([{
+      const urgency = safeStr(report.urgency);
+      const priority = urgency === 'high' ? 'high' : urgency === 'low' ? 'low' : 'normal';
+
+      const insertPayload: any = {
         client_id,
         kind: report.type === 'complaint' ? 'complaint' : 'request',
         category: safeStr(report.category),
         subject: null,
         description: safeStr(report.description),
-        priority: report.urgency === 'high' ? 'high' : report.urgency === 'low' ? 'low' : 'normal',
+        priority,
         status: 'new',
-        customer_name: safeStr(report.citizen_name || push_name),
-        customer_contact: safeStr(report.citizen_contact || phone_e164),
+        customer_name: safeStr(report.citizen_name),
+        customer_contact: safeStr(report.citizen_contact),
         location_text: safeStr(report.location_text),
         channel: safeStr(report.channel || 'whatsapp'),
         metadata: { language: safeStr(report.language || 'pt-PT') },
         raw: report,
-      }]);
+      };
+
+      const { data: tData, error: tErr } = await supabase
+        .from('tickets')
+        .insert([insertPayload])
+        .select('tracking_code')
+        .maybeSingle();
+
+      if (tErr) {
+        console.error('Ticket insert error:', tErr);
+      } else if (tData?.tracking_code) {
+        replyUser =
+          `Feito ✅ Registei o teu pedido com o código **${tData.tracking_code}**.\n` +
+          `Podes perguntar a qualquer momento: *estado ${tData.tracking_code}*.`;
+      }
     }
 
     return NextResponse.json({
       ok: true,
-      data: { client_id, phone_e164, reply: replyClean },
+      data: { client_id, phone_e164, reply: replyUser },
     });
-
   } catch (err: any) {
     console.error('BOT REPLY error:', err);
     return NextResponse.json({ ok: false, error: err?.message || 'Erro interno' }, { status: 500 });
