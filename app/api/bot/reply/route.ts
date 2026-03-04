@@ -9,47 +9,59 @@ function isValidApiKey(req: Request) {
 }
 
 // ✅ Trial: válido até trial_end
-// ✅ Active: válido; se tiver trial_end, respeita; se não tiver, assume pago (não expira aqui)
+// ✅ Active: válido; se tiver trial_end, respeita; se não tiver trial_end, assume pago (não expira aqui)
 // ❌ Expired: bloqueia
 function isServiceActive(client: any) {
   if (!client) return false;
-
   const status = String(client.status || '').toLowerCase();
-
   if (status === 'expired') return false;
 
-  if (status === 'trial') {
-    if (!client.trial_end) return false;
-    const end = new Date(client.trial_end);
-    if (isNaN(end.getTime())) return false;
-    return end.getTime() > Date.now();
+  const trialEnd = client.trial_end ? new Date(client.trial_end) : null;
+  if (trialEnd && !isNaN(trialEnd.getTime())) {
+    return trialEnd.getTime() > Date.now();
   }
 
-  if (status === 'active') {
-    if (!client.trial_end) return true;
-    const end = new Date(client.trial_end);
-    if (isNaN(end.getTime())) return true;
-    return end.getTime() > Date.now();
-  }
+  // active sem trial_end => pago (não expira aqui)
+  return status === 'active';
+}
 
-  return false;
+function safeStr(v: any) {
+  if (v === null || v === undefined) return '';
+  return String(v).trim();
+}
+
+// Extrai JSON de report quando o modelo devolver { "__REPORT__": true, ... }
+function extractJsonReport(text: string) {
+  if (!text) return null;
+  const start = text.indexOf('{');
+  const end = text.lastIndexOf('}');
+  if (start === -1 || end === -1 || end <= start) return null;
+
+  const slice = text.slice(start, end + 1);
+  try {
+    const obj = JSON.parse(slice);
+    if (obj && obj.__REPORT__ === true) return obj;
+    return null;
+  } catch {
+    return null;
+  }
 }
 
 export async function POST(req: Request) {
   try {
     const supabase = createClient();
 
+    // Auth: API key (server-to-server) OU sessão (dashboard)
     const apiKeyOk = isValidApiKey(req);
     const { data: { session } } = await supabase.auth.getSession();
-
     if (!apiKeyOk && !session) {
       return NextResponse.json({ ok: false, error: 'Não autorizado' }, { status: 401 });
     }
 
     const body = await req.json();
     const client_id = Number(body.client_id);
-    const phone_e164 = String(body.phone_e164 || '');
-    const text = String(body.text || '');
+    const phone_e164 = safeStr(body.phone_e164 || '');
+    const text = safeStr(body.text || '');
 
     if (!client_id || !phone_e164 || !text) {
       return NextResponse.json(
@@ -58,6 +70,7 @@ export async function POST(req: Request) {
       );
     }
 
+    // 🔎 Buscar cliente
     const { data: client, error: cErr } = await supabase
       .from('clients')
       .select('id, status, trial_end, bot_instructions, company_name, instance_name')
@@ -66,6 +79,7 @@ export async function POST(req: Request) {
 
     if (cErr) throw cErr;
 
+    // 🚫 BLOQUEIO POR STATUS + DATA (trial_end)
     if (!isServiceActive(client)) {
       return NextResponse.json(
         {
@@ -73,15 +87,15 @@ export async function POST(req: Request) {
           error: 'Serviço expirado',
           reason: 'subscription-expired',
           status: client?.status,
-          trial_end: client?.trial_end,
+          trial_end: client?.trial_end
         },
         { status: 403 }
       );
     }
 
+    // 🔹 Prompt final (base + client)
     const base = await getSystemBasePrompt();
     const finalPrompt = mergePrompts(base, client?.bot_instructions || '');
-
     if (!finalPrompt) {
       return NextResponse.json(
         { ok: false, error: 'Prompt vazio. Define SYSTEM_BASE_PROMPT ou bot_instructions.' },
@@ -91,12 +105,47 @@ export async function POST(req: Request) {
 
     const groqKey = process.env.GROQ_API_KEY || '';
     const model = process.env.GROQ_MODEL || 'llama-3.1-8b-instant';
-
     if (!groqKey) {
       return NextResponse.json({ ok: false, error: 'GROQ_API_KEY em falta' }, { status: 500 });
     }
 
-    const groqRes = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+    const instanceName = safeStr(client?.instance_name) || `client-${client_id}`;
+
+    // ✅ 1) Buscar histórico (últimas 10 mensagens) para dar contexto e parar de repetir
+    const { data: history, error: hErr } = await supabase
+      .from('wa_messages')
+      .select('direction, text')
+      .eq('phone_e164', phone_e164)
+      .eq('instance', instanceName)
+      .order('created_at', { ascending: false })
+      .limit(10);
+
+    if (hErr) {
+      console.error('History fetch error:', hErr);
+    }
+
+    const historyMessages =
+      (history || [])
+        .reverse()
+        .map((m: any) => ({
+          role: m.direction === 'in' ? 'user' : 'assistant',
+          content: safeStr(m.text),
+        }))
+        .filter((m: any) => m.content);
+
+    // ✅ 2) Guardar a mensagem IN antes de chamar o Groq
+    const { error: inErr } = await supabase.from('wa_messages').insert([{
+      phone_e164,
+      instance: instanceName,
+      direction: 'in',
+      text,
+      raw: { source: 'api/bot/reply', client_id },
+    }]);
+
+    if (inErr) console.error('Insert IN error:', inErr);
+
+    // ✅ 3) Chamar Groq com prompt + histórico + mensagem atual
+    const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -107,46 +156,65 @@ export async function POST(req: Request) {
         temperature: 0.2,
         messages: [
           { role: 'system', content: finalPrompt },
+          ...historyMessages,
           { role: 'user', content: text },
         ],
       }),
     });
 
-    const raw = await groqRes.text();
+    const rawText = await res.text();
     let data: any = null;
-    try { data = JSON.parse(raw); } catch { data = null; }
+    try { data = JSON.parse(rawText); } catch { data = null; }
 
-    if (!groqRes.ok || !data) {
+    if (!res.ok || !data) {
       return NextResponse.json(
-        { ok: false, error: 'Erro ao chamar Groq', debug: raw?.slice(0, 500) },
+        { ok: false, error: 'Erro ao chamar Groq', debug: rawText?.slice(0, 500) },
         { status: 500 }
       );
     }
 
-    const reply = data?.choices?.[0]?.message?.content || '';
-    const instance = client?.instance_name || `client-${client_id}`;
+    const reply = safeStr(data?.choices?.[0]?.message?.content || '');
 
-    await supabase.from('wa_messages').insert([
-      {
-        phone_e164,
-        instance,
-        direction: 'in',
-        text,
-        raw: { source: 'api/bot/reply', client_id },
-      },
-      {
-        phone_e164,
-        instance,
-        direction: 'out',
-        text: reply,
-        raw: { model, source: 'groq' },
-      },
-    ]);
+    // ✅ 4) Guardar OUT
+    const { error: outErr } = await supabase.from('wa_messages').insert([{
+      phone_e164,
+      instance: instanceName,
+      direction: 'out',
+      text: reply,
+      raw: { model, source: 'groq' },
+    }]);
+
+    if (outErr) console.error('Insert OUT error:', outErr);
+
+    // ✅ 5) Se vier __REPORT__, tenta gravar ticket (não falha o reply se der erro)
+    const report = extractJsonReport(reply);
+    if (report) {
+      try {
+        await supabase.from('tickets').insert([{
+          client_id,
+          kind: report.type === 'complaint' ? 'complaint' : 'request',
+          category: safeStr(report.category),
+          subject: null,
+          description: safeStr(report.description),
+          priority: report.urgency === 'high' ? 'high' : report.urgency === 'low' ? 'low' : 'normal',
+          status: 'new',
+          customer_name: safeStr(report.citizen_name),
+          customer_contact: safeStr(report.citizen_contact),
+          location_text: safeStr(report.location_text),
+          channel: safeStr(report.channel || 'whatsapp'),
+          metadata: { language: safeStr(report.language || 'pt-PT') },
+          raw: report,
+        }]);
+      } catch (e) {
+        console.error('Ticket insert error:', e);
+      }
+    }
 
     return NextResponse.json({
       ok: true,
-      data: { client_id, phone_e164, reply },
+      data: { client_id, phone_e164, reply }
     });
+
   } catch (err: any) {
     console.error('BOT REPLY error:', err);
     return NextResponse.json(
