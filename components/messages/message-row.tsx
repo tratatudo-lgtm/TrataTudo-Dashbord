@@ -1,18 +1,8 @@
 'use client';
 
 import {
-<<<<<<< HEAD
-  ArrowUpRight,
-  ArrowDownLeft,
-  ExternalLink,
-  UserPlus,
-  MessageSquare,
-  Copy,
-  Check,
-=======
   ArrowUpRight, ArrowDownLeft, ExternalLink,
   UserPlus, MessageSquare, Copy, Check
->>>>>>> 841c8a2 (Fix dashboard clients page and messages mapping)
 } from 'lucide-react';
 import Link from 'next/link';
 import { useMemo, useState } from 'react';
@@ -20,27 +10,26 @@ import { useMemo, useState } from 'react';
 export function MessageRow({ message, clients }: { message: any; clients: any[] }) {
   const [copied, setCopied] = useState(false);
 
-<<<<<<< HEAD
   const msgPhone = String(message?.phone_e164 || message?.phone || message?.number || '').trim();
   const msgInstance = String(message?.instance || message?.instance_name || '').trim();
 
-  // Encontrar cliente:
-  // 1) por instance (mais fiável no teu modelo)
-  // 2) fallback por phone_e164 (se existir)
   const client = useMemo(() => {
     if (!Array.isArray(clients)) return null;
 
+    // 1) tenta por instância (mais fiável)
     if (msgInstance) {
       const byInstance = clients.find((c: any) => {
-        const inst = String(c?.production_instance_name || c?.instance_name || '').trim();
-        return inst && inst === msgInstance;
+        const inst1 = String(c?.production_instance_name || '').trim();
+        const inst2 = String(c?.instance_name || '').trim();
+        return inst1 === msgInstance || inst2 === msgInstance;
       });
       if (byInstance) return byInstance;
     }
 
+    // 2) tenta por telefone (fallback)
     if (msgPhone) {
       const byPhone = clients.find((c: any) => {
-        const p = String(c?.phone_e164 || c?.phone || c?.number || '').trim();
+        const p = String(c?.phone_e164 || c?.phone || '').trim();
         return p && p === msgPhone;
       });
       if (byPhone) return byPhone;
@@ -50,23 +39,10 @@ export function MessageRow({ message, clients }: { message: any; clients: any[] 
   }, [clients, msgInstance, msgPhone]);
 
   const clientId = client?.id ?? client?.client_id ?? null;
-=======
-  const phone = message.phone_e164 || message.phone || '';
-  const instance = message.instance || message.instance_name || '';
-
-  // ✅ Match correto: por instance (ex: "client-6" ou "TrataTudo bot")
-  const client =
-    clients.find(c =>
-      (c.production_instance_name && c.production_instance_name === instance) ||
-      (c.instance_name && c.instance_name === instance)
-    ) || null;
-
-  const clientId = client?.client_id ?? client?.id ?? null;
   const clientName = client?.company_name ?? 'Desconhecido';
->>>>>>> 841c8a2 (Fix dashboard clients page and messages mapping)
 
   const copyText = () => {
-    navigator.clipboard.writeText(message?.text || '');
+    navigator.clipboard.writeText(String(message?.text || ''));
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
   };
@@ -85,89 +61,57 @@ export function MessageRow({ message, clients }: { message: any; clients: any[] 
       </td>
 
       <td className="px-6 py-4">
-<<<<<<< HEAD
-        {client && clientId ? (
+        {clientId ? (
           <Link
             href={`/app/clients/${clientId}`}
             className="flex items-center gap-2 text-indigo-600 hover:text-indigo-700 font-semibold group/link"
           >
-            {client.company_name}
+            {clientName}
             <ExternalLink className="h-3 w-3 opacity-0 group-hover/link:opacity-100 transition-opacity" />
           </Link>
-=======
-        {clientId ? (
-          <>
-            <Link
-              href={`/app/clients/${clientId}`}
-              className="flex items-center gap-2 text-indigo-600 hover:text-indigo-700 font-semibold group/link"
-            >
-              {clientName}
-              <ExternalLink className="h-3 w-3 opacity-0 group-hover/link:opacity-100 transition-opacity" />
-            </Link>
-            <div className="text-[10px] text-slate-400 font-mono mt-0.5">
-              Instância: {instance || '-'}
-            </div>
-          </>
->>>>>>> 841c8a2 (Fix dashboard clients page and messages mapping)
         ) : (
           <div className="flex items-center gap-2 text-slate-400 italic text-xs">
             Desconhecido
-            <Link
-<<<<<<< HEAD
-              href={`/app/clients?q=${encodeURIComponent(msgPhone || '')}`}
-=======
-              href={`/app/clients?q=${encodeURIComponent(phone)}`}
->>>>>>> 841c8a2 (Fix dashboard clients page and messages mapping)
-              className="p-1 rounded bg-slate-100 text-slate-600 hover:bg-indigo-100 hover:text-indigo-700 transition"
-              title="Criar/Procurar cliente por este número"
-            >
-              <UserPlus className="h-3 w-3" />
-            </Link>
+            {msgPhone ? (
+              <Link
+                href={`/app/clients?q=${encodeURIComponent(msgPhone)}`}
+                className="p-1 rounded bg-slate-100 text-slate-600 hover:bg-indigo-100 hover:text-indigo-700 transition"
+                title="Criar Cliente com este número"
+              >
+                <UserPlus className="h-3 w-3" />
+              </Link>
+            ) : null}
           </div>
         )}
 
-<<<<<<< HEAD
-        <div className="text-[10px] text-slate-400 font-mono mt-0.5">{msgPhone || '-'}</div>
+        <div className="text-[10px] text-slate-400 font-mono mt-0.5">
+          {msgPhone || '-'}
+        </div>
 
-        {msgInstance && (
-          <div className="text-[9px] text-slate-400 font-mono mt-1">Instância: {msgInstance}</div>
-        )}
-=======
-        <div className="text-[10px] text-slate-400 font-mono mt-0.5">{phone}</div>
->>>>>>> 841c8a2 (Fix dashboard clients page and messages mapping)
+        {msgInstance ? (
+          <div className="text-[9px] text-slate-400 font-mono mt-1">
+            Instância: {msgInstance}
+          </div>
+        ) : null}
       </td>
 
       <td className="px-6 py-4">
-        <span
-          className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-[10px] font-bold uppercase tracking-wider ${
-            message.direction === 'in' ? 'bg-blue-100 text-blue-700' : 'bg-emerald-100 text-emerald-700'
-          }`}
-        >
+        <span className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-[10px] font-bold uppercase tracking-wider ${
+          message.direction === 'in' ? 'bg-blue-100 text-blue-700' : 'bg-emerald-100 text-emerald-700'
+        }`}>
           {message.direction === 'in' ? (
-            <>
-              <ArrowDownLeft className="h-3 w-3" /> Recebida
-            </>
+            <><ArrowDownLeft className="h-3 w-3" /> Recebida</>
           ) : (
-            <>
-              <ArrowUpRight className="h-3 w-3" /> Enviada
-            </>
+            <><ArrowUpRight className="h-3 w-3" /> Enviada</>
           )}
         </span>
       </td>
 
       <td className="px-6 py-4">
         <div className="max-w-md">
-          <p className="text-slate-700 line-clamp-2 text-xs leading-relaxed" title={message.text}>
-            {message.text}
+          <p className="text-slate-700 line-clamp-2 text-xs leading-relaxed" title={String(message.text || '')}>
+            {String(message.text || '')}
           </p>
-<<<<<<< HEAD
-=======
-          {instance && (
-            <span className="text-[9px] text-slate-400 font-mono mt-1 block">
-              Instância: {instance}
-            </span>
-          )}
->>>>>>> 841c8a2 (Fix dashboard clients page and messages mapping)
         </div>
       </td>
 
@@ -180,14 +124,10 @@ export function MessageRow({ message, clients }: { message: any; clients: any[] 
           >
             {copied ? <Check className="h-4 w-4 text-emerald-500" /> : <Copy className="h-4 w-4" />}
           </button>
-<<<<<<< HEAD
 
-=======
->>>>>>> 841c8a2 (Fix dashboard clients page and messages mapping)
           <button
             className="p-1.5 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 rounded-lg transition"
             title="Ver Detalhes"
-            type="button"
           >
             <MessageSquare className="h-4 w-4" />
           </button>
