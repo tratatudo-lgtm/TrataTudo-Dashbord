@@ -1,3 +1,5 @@
+export const dynamic = 'force-dynamic';
+
 import { NextResponse } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
 import { getSystemBasePrompt, mergePrompts } from '@/lib/promptBase';
@@ -8,9 +10,9 @@ function isValidApiKey(req: Request) {
   return expected.length > 0 && key === expected;
 }
 
-// ✅  Trial: válido até trial_end
-// ✅  Active: válido; se tiver trial_end, respeita; se não tiver, assume pago (não expira aqui)
-// ❌  Expired: bloqueia
+// ✅ Trial: válido até trial_end
+// ✅ Active: válido; se tiver trial_end, respeita; se não tiver, assume pago
+// ❌ Expired: bloqueia
 function isServiceActive(client: any) {
   if (!client) return false;
 
@@ -25,7 +27,7 @@ function isServiceActive(client: any) {
   }
 
   if (status === 'active') {
-    if (!client.trial_end) return true; // pago
+    if (!client.trial_end) return true;
     const end = new Date(client.trial_end);
     if (isNaN(end.getTime())) return true;
     return end.getTime() > Date.now();
@@ -39,7 +41,7 @@ function safeStr(v: any) {
   return String(v).trim();
 }
 
-// tenta extrair JSON __REPORT__ (mesmo se vier misturado no texto)
+// tenta extrair JSON __REPORT__ sem rebentar
 function extractJsonReport(text: string) {
   try {
     const start = text.indexOf('{');
@@ -54,35 +56,60 @@ function extractJsonReport(text: string) {
   }
 }
 
-// remove qualquer bloco JSON do texto (para nunca aparecer __REPORT__/debug no WhatsApp)
-function stripJsonBlocks(text: string) {
-  const s = safeStr(text);
-  if (!s) return '';
-  const start = s.indexOf('{');
-  const end = s.lastIndexOf('}');
-  if (start !== -1 && end !== -1 && end > start) {
-    const before = s.slice(0, start).trim();
-    const after = s.slice(end + 1).trim();
-    return [before, after].filter(Boolean).join('\n').trim();
-  }
-  return s;
+// remove qualquer JSON do output final para o utilizador (para não aparecer “lixo” no chat)
+function stripJsonFromReply(text: string) {
+  const t = safeStr(text);
+  if (!t) return '';
+  const start = t.indexOf('{');
+  const end = t.lastIndexOf('}');
+  if (start === -1 || end === -1 || end <= start) return t;
+
+  // se parece que o modelo colou JSON no fim, remove
+  const before = t.slice(0, start).trim();
+  return before || t;
 }
 
-// evita “olá / bem-vindo” repetido quando já existe histórico
-function enforceNoRepeatGreeting(reply: string, hasHistory: boolean) {
-  const r = safeStr(reply);
-  if (!hasHistory) return r;
+function normalizeName(pushName: string) {
+  const n = safeStr(pushName);
+  if (!n) return '';
+  // evita nomes enormes
+  return n.length > 30 ? n.slice(0, 30) : n;
+}
 
-  const norm = r.toLowerCase();
-  const looksLikeGreetingOnly =
-    norm.length < 90 &&
-    (norm.includes('olá') || norm.includes('ola') || norm.includes('bem-vindo') || norm.includes('bem vindo')) &&
-    (norm.includes('como posso ajudar') || norm.includes('em que posso ajudar') || norm.includes('o que precisas'));
+/**
+ * (Opcional) Pesquisa via SearXNG
+ * Ativa se tiveres SEARXNG_URL no Vercel (ex: http://79.72.48.151:8888)
+ */
+async function searxSearch(query: string) {
+  const base = safeStr(process.env.SEARXNG_URL || '');
+  if (!base) return null;
 
-  if (looksLikeGreetingOnly) {
-    return 'Diz-me só o que precisas e eu trato disso contigo 🙂';
+  const url = `${base.replace(/\/$/, '')}/search?q=${encodeURIComponent(query)}&format=json`;
+
+  try {
+    const res = await fetch(url, {
+      method: 'GET',
+      headers: { 'Accept': 'application/json' },
+      // evita cache estranha
+      cache: 'no-store',
+    });
+
+    if (!res.ok) return null;
+
+    const data: any = await res.json().catch(() => null);
+    if (!data?.results || !Array.isArray(data.results)) return null;
+
+    // devolve top 3
+    const top = data.results.slice(0, 3).map((r: any) => ({
+      title: safeStr(r?.title),
+      url: safeStr(r?.url),
+      content: safeStr(r?.content),
+    }));
+
+    return top.length ? top : null;
+  } catch {
+    return null;
   }
-  return r;
 }
 
 export async function POST(req: Request) {
@@ -91,10 +118,7 @@ export async function POST(req: Request) {
 
     // Auth: API key (server-to-server) OU sessão (dashboard)
     const apiKeyOk = isValidApiKey(req);
-    const {
-      data: { session },
-    } = await supabase.auth.getSession();
-
+    const { data: { session } } = await supabase.auth.getSession();
     if (!apiKeyOk && !session) {
       return NextResponse.json({ ok: false, error: 'Não autorizado' }, { status: 401 });
     }
@@ -104,9 +128,7 @@ export async function POST(req: Request) {
     const client_id = Number(body.client_id);
     const phone_e164 = safeStr(body.phone_e164);
     const text = safeStr(body.text);
-
-    // nome do WhatsApp (quando vier do webhook / api)
-    const push_name = safeStr(body.push_name || body.pushName || '');
+    const push_name = normalizeName(body.push_name || '');
 
     if (!client_id || !phone_e164 || !text) {
       return NextResponse.json(
@@ -132,16 +154,15 @@ export async function POST(req: Request) {
           error: 'Serviço expirado',
           reason: 'subscription-expired',
           status: client?.status,
-          trial_end: client?.trial_end,
+          trial_end: client?.trial_end
         },
         { status: 403 }
       );
     }
 
-    // 🔹 Prompt final
+    // 🔹 Prompt final (GLOBAL + cliente)
     const base = await getSystemBasePrompt();
     const finalPrompt = mergePrompts(base, client?.bot_instructions || '');
-
     if (!finalPrompt) {
       return NextResponse.json(
         { ok: false, error: 'Prompt vazio. Define SYSTEM_BASE_PROMPT ou bot_instructions.' },
@@ -151,19 +172,18 @@ export async function POST(req: Request) {
 
     const groqKey = process.env.GROQ_API_KEY || '';
     const model = process.env.GROQ_MODEL || 'llama-3.1-8b-instant';
-
     if (!groqKey) {
       return NextResponse.json({ ok: false, error: 'GROQ_API_KEY em falta' }, { status: 500 });
     }
 
-    // ✅ HISTÓRICO: últimas 12 mensagens desta pessoa nesta instância
     const instance = safeStr(client.instance_name);
-    let historyMsgs: Array<{ role: 'user' | 'assistant'; content: string }> = [];
 
+    // ✅ HISTÓRICO: últimas 12 mensagens desta pessoa nesta instância
+    let historyMsgs: any[] = [];
     if (instance) {
       const { data: hist, error: hErr } = await supabase
         .from('wa_messages')
-        .select('direction, text, created_at')
+        .select('direction, text, created_at, raw')
         .eq('phone_e164', phone_e164)
         .eq('instance', instance)
         .order('created_at', { ascending: false })
@@ -177,28 +197,44 @@ export async function POST(req: Request) {
             role: m.direction === 'out' ? 'assistant' : 'user',
             content: safeStr(m.text),
           }))
-          .filter((m) => m.content.length > 0);
+          .filter((m: any) => m.content.length > 0);
       }
     }
 
+    // ✅ Contexto anti “olá” + nome (só 1x)
     const hasHistory = historyMsgs.length > 0;
 
-    // 🔒 Regras técnicas extras (nome WhatsApp + anti-saudação + anti-JSON)
-    const systemWithContext = `
-${finalPrompt}
+    const systemWithContext =
+      `${finalPrompt}\n\n` +
+      `### CONTEXTO DE RUNTIME (OBRIGATÓRIO)\n` +
+      `- Nome WhatsApp (se existir): "${push_name || ''}"\n` +
+      `- Já existe histórico nesta conversa? ${hasHistory ? 'SIM' : 'NÃO'}\n` +
+      `REGRAS:\n` +
+      `1) Se "Já existe histórico" = SIM, NÃO faças saudações ("olá", "bem-vindo", apresentações). Vai direto ao assunto.\n` +
+      `2) Usa o nome WhatsApp no máximo 1 vez de forma natural (se existir).\n` +
+      `3) Nunca devolvas JSON ao utilizador. Se gerares JSON interno, ele deve ficar “escondido” (não escrever no texto final).\n`;
 
-# Regras técnicas (OBRIGATÓRIO)
-- O utilizador chama-se: ${push_name ? push_name : '(desconhecido)'}.
-- Se já houver conversa (histórico), NÃO voltes a dizer "olá", "bem-vindo", nem mensagens de apresentação. Vai direto ao assunto.
-- NUNCA mostres JSON, nem blocos técnicos, nem "__REPORT__" ao utilizador.
-- Se precisares de criar ticket, podes gerar um JSON __REPORT__, mas ele NÃO deve aparecer na mensagem ao utilizador.
-`.trim();
+    // (Opcional) tentativa de pesquisa se o utilizador perguntar algo factual “de datas/feriados/horários”
+    // Só adiciona resultados ao contexto, NÃO mostra links ao utilizador automaticamente.
+    const mightNeedSearch =
+      /feriado|quando é|data|horário|contacto|telefone|site oficial|decreto|lei/i.test(text);
 
-    // 🚀 Chamar Groq com contexto
+    let webSnippets = '';
+    if (mightNeedSearch) {
+      const results = await searxSearch(`${text} ${safeStr(client.company_name || '')}`.trim());
+      if (results && results.length) {
+        webSnippets =
+          `\n### RESULTADOS DE PESQUISA (usar para precisão; não inventar)\n` +
+          results.map((r: any, i: number) =>
+            `${i + 1}) ${r.title}\n${r.content}\n${r.url}`
+          ).join('\n\n') + '\n';
+      }
+    }
+
     const messages = [
-      { role: 'system' as const, content: systemWithContext },
+      { role: 'system', content: systemWithContext + webSnippets },
       ...historyMsgs,
-      { role: 'user' as const, content: text },
+      { role: 'user', content: text },
     ];
 
     const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
@@ -216,11 +252,7 @@ ${finalPrompt}
 
     const raw = await res.text();
     let data: any;
-    try {
-      data = JSON.parse(raw);
-    } catch {
-      data = null;
-    }
+    try { data = JSON.parse(raw); } catch { data = null; }
 
     if (!res.ok || !data) {
       return NextResponse.json(
@@ -230,42 +262,40 @@ ${finalPrompt}
     }
 
     const replyRaw = safeStr(data?.choices?.[0]?.message?.content || '');
+
+    // ✅ ticket report (se existir)
     const report = extractJsonReport(replyRaw);
 
-    // texto “limpo” para o utilizador (sem JSON)
-    let replyUser = stripJsonBlocks(replyRaw);
-    replyUser = enforceNoRepeatGreeting(replyUser, hasHistory);
+    // ✅ texto final sem JSON
+    const reply = stripJsonFromReply(replyRaw);
 
-    // 💾 Guardar mensagens (IN e OUT) — OUT sempre “limpo”
+    // 💾 Guardar mensagens (IN e OUT)
     await supabase.from('wa_messages').insert([
       {
         phone_e164,
         instance,
         direction: 'in',
         text,
-        raw: { source: 'api/bot/reply', client_id, push_name },
+        raw: { source: 'api/bot/reply', client_id, push_name: push_name || undefined },
       },
       {
         phone_e164,
         instance,
         direction: 'out',
-        text: replyUser,
-        raw: { model, source: 'groq', push_name },
+        text: reply,
+        raw: { model, source: 'groq', push_name: push_name || undefined },
       },
     ]);
 
-    // ✅ Se vier __REPORT__, cria ticket (e devolve código ao utilizador)
+    // ✅ Se vier __REPORT__, cria ticket (sem mostrar ao utilizador)
     if (report) {
-      const urgency = safeStr(report.urgency);
-      const priority = urgency === 'high' ? 'high' : urgency === 'low' ? 'low' : 'normal';
-
-      const insertPayload: any = {
+      await supabase.from('tickets').insert([{
         client_id,
         kind: report.type === 'complaint' ? 'complaint' : 'request',
         category: safeStr(report.category),
         subject: null,
         description: safeStr(report.description),
-        priority,
+        priority: report.urgency === 'high' ? 'high' : report.urgency === 'low' ? 'low' : 'normal',
         status: 'new',
         customer_name: safeStr(report.citizen_name),
         customer_contact: safeStr(report.citizen_contact),
@@ -273,27 +303,14 @@ ${finalPrompt}
         channel: safeStr(report.channel || 'whatsapp'),
         metadata: { language: safeStr(report.language || 'pt-PT') },
         raw: report,
-      };
-
-      const { data: tData, error: tErr } = await supabase
-        .from('tickets')
-        .insert([insertPayload])
-        .select('tracking_code')
-        .maybeSingle();
-
-      if (tErr) {
-        console.error('Ticket insert error:', tErr);
-      } else if (tData?.tracking_code) {
-        replyUser =
-          `Feito ✅ Registei o teu pedido com o código **${tData.tracking_code}**.\n` +
-          `Podes perguntar a qualquer momento: *estado ${tData.tracking_code}*.`;
-      }
+      }]);
     }
 
     return NextResponse.json({
       ok: true,
-      data: { client_id, phone_e164, reply: replyUser },
+      data: { client_id, phone_e164, reply }
     });
+
   } catch (err: any) {
     console.error('BOT REPLY error:', err);
     return NextResponse.json({ ok: false, error: err?.message || 'Erro interno' }, { status: 500 });
