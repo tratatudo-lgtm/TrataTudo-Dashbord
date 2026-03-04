@@ -1,54 +1,102 @@
-import { createServerClient, type CookieOptions } from '@supabase/ssr';
 import { NextResponse, type NextRequest } from 'next/server';
+import { createServerClient } from '@supabase/ssr';
 
-export async function middleware(request: NextRequest) {
-  // Só vamos proteger rotas /app
-  const isAppRoute = request.nextUrl.pathname.startsWith('/app');
-  if (!isAppRoute) {
+function isPublicPath(pathname: string) {
+  // Ajusta aqui se o teu login tiver outro caminho
+  const PUBLIC = [
+    '/', // vamos decidir no handler
+    '/auth',
+    '/auth/login',
+    '/reset-password',
+    '/api/health',
+    '/api/diagnostics/env', // se quiseres deixar público
+  ];
+
+  // Qualquer coisa dentro de /auth fica pública
+  if (pathname.startsWith('/auth')) return true;
+  return PUBLIC.includes(pathname);
+}
+
+export async function middleware(req: NextRequest) {
+  const { pathname } = req.nextUrl;
+
+  // deixa passar static, next internals, favicon, etc.
+  if (
+    pathname.startsWith('/_next') ||
+    pathname.startsWith('/favicon') ||
+    pathname.startsWith('/robots.txt') ||
+    pathname.startsWith('/sitemap.xml')
+  ) {
     return NextResponse.next();
   }
 
-  let response = NextResponse.next({
-    request: { headers: request.headers },
-  });
+  // Criar resposta para podermos gerir cookies
+  let res = NextResponse.next();
 
-  const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
-  const key = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!;
+  const supabaseAnon = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!;
 
-  // Se não houver env, não bloquear
-  if (!url || !key) {
-    return response;
-  }
+  // Se faltar env, não bloqueia (mas ideal é ter)
+  if (!supabaseUrl || !supabaseAnon) return res;
 
-  const supabase = createServerClient(url, key, {
+  const supabase = createServerClient(supabaseUrl, supabaseAnon, {
     cookies: {
-      get(name: string) {
-        return request.cookies.get(name)?.value;
+      getAll() {
+        return req.cookies.getAll();
       },
-      set(name: string, value: string, options: CookieOptions) {
-        request.cookies.set({ name, value, ...options });
-        response = NextResponse.next({ request: { headers: request.headers } });
-        response.cookies.set({ name, value, ...options });
-      },
-      remove(name: string, options: CookieOptions) {
-        request.cookies.set({ name, value: '', ...options });
-        response = NextResponse.next({ request: { headers: request.headers } });
-        response.cookies.set({ name, value: '', ...options });
+      setAll(cookiesToSet) {
+        cookiesToSet.forEach(({ name, value, options }) => {
+          res.cookies.set(name, value, options);
+        });
       },
     },
   });
 
-  const { data: { session } } = await supabase.auth.getSession();
+  const {
+    data: { session },
+  } = await supabase.auth.getSession();
 
-  // Se tentar entrar em /app sem sessão -> login
-  if (!session) {
-    const loginUrl = new URL('/login', request.url);
-    return NextResponse.redirect(loginUrl);
+  // ✅ Regra 1: se tentarem aceder /app sem sessão → login
+  if (pathname.startsWith('/app')) {
+    if (!session) {
+      const url = req.nextUrl.clone();
+      url.pathname = '/auth/login'; // <-- troca se o teu login for outro
+      url.searchParams.set('next', pathname);
+      return NextResponse.redirect(url);
+    }
+    return res;
   }
 
-  return response;
+  // ✅ Regra 2 (opcional): proteger APIs de admin por sessão também
+  // Se tu usas X-TrataTudo-Key, deixa como está (não mexo).
+  // Mas se queres mesmo bloquear admin sem sessão, ativa isto:
+  if (pathname.startsWith('/api/admin')) {
+    if (!session) {
+      return NextResponse.json(
+        { ok: false, error: 'Não autenticado', reason: 'no-session' },
+        { status: 401 }
+      );
+    }
+    return res;
+  }
+
+  // ✅ Regra 3: no "/" decide para onde vai
+  if (pathname === '/') {
+    const url = req.nextUrl.clone();
+    url.pathname = session ? '/app' : '/auth/login'; // <-- troca se login diferente
+    return NextResponse.redirect(url);
+  }
+
+  // resto do site
+  return res;
 }
 
 export const config = {
-  matcher: ['/app/:path*'],
+  matcher: [
+    /*
+      Apanha tudo menos _next/static e assets comuns.
+      (Já filtramos acima, mas isto dá performance)
+    */
+    '/((?!_next/static|_next/image|favicon.ico).*)',
+  ],
 };
