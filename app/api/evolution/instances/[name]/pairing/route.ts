@@ -15,10 +15,12 @@ export async function POST(
   { params }: { params: { name: string } }
 ) {
   try {
-    // Admin guard (mantém como tens no projeto)
+    // ✅ Admin guard (conforme o teu validateAdmin real)
     const adminCheck = await validateAdmin();
-    if (!adminCheck?.ok) {
-      return NextResponse.json({ ok: false, error: 'Não autorizado' }, { status: 401 });
+    if (!adminCheck?.isAdmin) {
+      const status = (adminCheck as any)?.status || 401;
+      const error = (adminCheck as any)?.error || 'Não autorizado';
+      return NextResponse.json({ ok: false, error }, { status });
     }
 
     const body = await req.json().catch(() => ({}));
@@ -40,7 +42,6 @@ export async function POST(
       );
     }
 
-    // Evolution pode devolver formatos diferentes, então tentamos os campos comuns
     const data: any = result.data;
     const code =
       safeStr(data?.code) ||
