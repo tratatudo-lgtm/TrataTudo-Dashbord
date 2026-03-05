@@ -205,18 +205,19 @@ export async function POST(req: Request) {
       }
     }
 
-    // ✅ 4) SEARCH LAYER (B): Whoogle Proxy (via searxngSearch) + allowlist por cliente
+    // ✅ 4) SEARCH LAYER (B): Whoogle Proxy + allowlist por cliente
     let systemWithContext = finalPrompt;
 
     if (shouldSearchWeb(text)) {
       // 4.1) ler allowlist do cliente (domínios permitidos)
       const allowDomains = await getClientAllowlistDomains(supabase, Number(client.id));
+      const allowCsv = allowDomains.join(',');
 
-      // 4.2) buscar resultados
-      const rawResults = await searxngSearch(text, 8);
+      // 4.2) buscar resultados (já com domains= no proxy)
+      const rawResults = await searxngSearch(text, 8, { domains: allowCsv || null });
 
-      // 4.3) filtrar por allowlist (se tiver)
-      const results = filterSourcesByAllowlist(rawResults, allowDomains).slice(0, 5);
+      // 4.3) filtrar por allowlist (defesa extra no backend)
+      const results = filterSourcesByAllowlist(rawResults, allowCsv || null).slice(0, 5);
 
       const ctx = buildSourcesContext(results);
 
@@ -224,7 +225,7 @@ export async function POST(req: Request) {
         const allowText =
           allowDomains.length > 0
             ? `- Só podes usar links destes domínios: ${allowDomains.join(', ')}.\n`
-            : `- Se não existir allowlist, usa apenas fontes que pareçam oficiais/autoridade.\n`;
+            : `- Se não existir allowlist, usa apenas fontes oficiais/autoridade (site institucional, governo, etc.).\n`;
 
         systemWithContext =
           `${finalPrompt}\n\n` +
