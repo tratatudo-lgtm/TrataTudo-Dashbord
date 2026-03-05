@@ -5,59 +5,29 @@ import { validateAdmin } from '@/lib/auth-admin';
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
-function safeStr(v: any) {
-  if (v === null || v === undefined) return '';
-  return String(v).trim();
-}
-
 export async function POST(
-  req: Request,
+  _req: Request,
   { params }: { params: { name: string } }
 ) {
+  const adminCheck = await validateAdmin();
+  if (!adminCheck?.isAdmin) {
+    return NextResponse.json(
+      { ok: false, error: adminCheck?.error || 'Não autorizado' },
+      { status: adminCheck?.status || 401 }
+    );
+  }
+
   try {
-    // ✅ Admin guard (conforme o teu validateAdmin real)
-    const adminCheck = await validateAdmin();
-    if (!adminCheck?.isAdmin) {
-      const status = (adminCheck as any)?.status || 401;
-      const error = (adminCheck as any)?.error || 'Não autorizado';
-      return NextResponse.json({ ok: false, error }, { status });
-    }
-
-    const body = await req.json().catch(() => ({}));
-    const phone_e164 = safeStr(body?.phone_e164 || body?.phone || body?.number);
-
-    if (!phone_e164) {
-      return NextResponse.json(
-        { ok: false, error: 'Telefone é obrigatório para pairing code' },
-        { status: 400 }
-      );
-    }
-
-    const result = await getEvolutionPairingCode(params.name, phone_e164);
+    const result = await getEvolutionPairingCode(params.name);
 
     if (!result.ok) {
       return NextResponse.json(
-        { ok: false, error: result.raw || 'Falha ao obter pairing code', status: result.status },
-        { status: 502 }
+        { ok: false, error: result.error || 'Erro no Evolution', details: result.raw },
+        { status: result.status || 500 }
       );
     }
 
-    const data: any = result.data;
-    const code =
-      safeStr(data?.code) ||
-      safeStr(data?.pairingCode) ||
-      safeStr(data?.data?.code) ||
-      safeStr(data?.data?.pairingCode) ||
-      '';
-
-    if (!code) {
-      return NextResponse.json(
-        { ok: false, error: 'Pairing code vazio', debug: data ?? null },
-        { status: 502 }
-      );
-    }
-
-    return NextResponse.json({ ok: true, data: { code } });
+    return NextResponse.json({ ok: true, data: result.data });
   } catch (error: any) {
     return NextResponse.json(
       { ok: false, error: error?.message || 'Erro interno' },
