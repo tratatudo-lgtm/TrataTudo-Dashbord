@@ -11,45 +11,62 @@ function safeStr(v: any) {
 }
 
 export async function POST(req: Request) {
-  const body = await req.json().catch(() => ({}));
-  const email = safeStr(body.email);
-  const password = safeStr(body.password);
+  try {
+    const body = await req.json().catch(() => ({}));
+    const email = safeStr(body.email);
+    const password = safeStr(body.password);
 
-  if (!email || !password) {
-    return NextResponse.json({ ok: false, error: "email e password são obrigatórios" }, { status: 400 });
-  }
+    if (!email || !password) {
+      return NextResponse.json(
+        { ok: false, error: "email e password são obrigatórios" },
+        { status: 400 }
+      );
+    }
 
-  const url = process.env.NEXT_PUBLIC_SUPABASE_URL || "";
-  const anon = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || "";
-  if (!url || !anon) {
-    return NextResponse.json({ ok: false, error: "Supabase env em falta" }, { status: 500 });
-  }
+    const url = process.env.NEXT_PUBLIC_SUPABASE_URL || "";
+    const anon = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || "";
+    if (!url || !anon) {
+      return NextResponse.json(
+        { ok: false, error: "Supabase env em falta" },
+        { status: 500 }
+      );
+    }
 
-  // IMPORTANTE: criar response cedo para conseguir SETAR cookies
-  const res = NextResponse.json({ ok: true });
+    // criar resposta cedo para poder SETAR cookies nela
+    const res = NextResponse.json({ ok: true });
 
-  const cookieStore = cookies();
+    const cookieStore = cookies();
 
-  const supabase = createServerClient(url, anon, {
-    cookies: {
-      getAll() {
-        return cookieStore.getAll();
+    const supabase = createServerClient(url, anon, {
+      cookies: {
+        getAll() {
+          return cookieStore.getAll();
+        },
+        setAll(cookiesToSet) {
+          cookiesToSet.forEach(({ name, value, options }) => {
+            res.cookies.set(name, value, options);
+          });
+        },
       },
-      setAll(cookiesToSet) {
-        // escreve cookies na resposta (isto é o que te está a faltar)
-        cookiesToSet.forEach(({ name, value, options }) => {
-          res.cookies.set(name, value, options);
-        });
-      },
-    },
-  });
+    });
 
-  const { data, error } = await supabase.auth.signInWithPassword({ email, password });
+    const { data, error } = await supabase.auth.signInWithPassword({
+      email,
+      password,
+    });
 
-  if (error || !data.session) {
-    return NextResponse.json({ ok: false, error: error?.message || "login_failed" }, { status: 401 });
+    if (error || !data?.session) {
+      return NextResponse.json(
+        { ok: false, error: error?.message || "login_failed" },
+        { status: 401 }
+      );
+    }
+
+    return res;
+  } catch (e: any) {
+    return NextResponse.json(
+      { ok: false, error: e?.message || "server_error" },
+      { status: 500 }
+    );
   }
-
-  // devolve OK e leva os cookies Supabase (sb-*) no header Set-Cookie
-  return res;
 }
