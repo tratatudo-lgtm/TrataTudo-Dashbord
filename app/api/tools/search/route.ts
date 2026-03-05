@@ -1,121 +1,61 @@
-import { NextResponse } from 'next/server';
+// app/api/tools/search/route.ts
+import { NextResponse } from "next/server";
+import { searxngSearch } from "@/lib/web/search";
 
-export const runtime = 'nodejs';
-export const dynamic = 'force-dynamic';
+export const runtime = "nodejs";
 
-function safeStr(v: any) {
-  if (v === null || v === undefined) return '';
-  return String(v).trim();
-}
-
-function splitDomains(domainsParam: string) {
-  return domainsParam
-    .split(',')
+function parseDomains(v: string | null) {
+  if (!v) return [];
+  return v
+    .split(",")
     .map((s) => s.trim())
-    .filter(Boolean)
-    .slice(0, 20);
+    .filter(Boolean);
 }
 
-function getProxyConfig() {
-  const base = safeStr(process.env.WHOOGLE_PROXY_URL || process.env.SEARCH_PROXY_URL);
-  const key = safeStr(process.env.WHOOGLE_PROXY_KEY || process.env.SEARCH_PROXY_KEY);
-
-  return { base, key };
-}
-
-async function callProxySearch(opts: { q: string; n: number; domains: string[] }) {
-  const { base, key } = getProxyConfig();
-
-  if (!base) {
-    return { ok: false, error: 'missing_WHOOGLE_PROXY_URL' as const };
-  }
-  if (!key) {
-    return { ok: false, error: 'missing_WHOOGLE_PROXY_KEY' as const };
-  }
-
-  const url = new URL('/search', base);
-  url.searchParams.set('q', opts.q);
-  url.searchParams.set('n', String(Math.max(1, Math.min(10, opts.n || 5))));
-  if (opts.domains.length > 0) {
-    url.searchParams.set('domains', opts.domains.join(','));
-  }
-
-  const res = await fetch(url.toString(), {
-    method: 'GET',
-    headers: {
-      'X-TrataTudo-Key': key,
-      'Accept': 'application/json',
-    },
-    cache: 'no-store',
-  });
-
-  const raw = await res.text();
-  let data: any = null;
-  try {
-    data = JSON.parse(raw);
-  } catch {
-    data = null;
-  }
-
-  if (!res.ok) {
-    return {
-      ok: false,
-      error: 'proxy_http_error' as const,
-      status: res.status,
-      raw_preview: raw?.slice(0, 300) || '',
-    };
-  }
-
-  if (!data?.ok) {
-    return {
-      ok: false,
-      error: 'proxy_error' as const,
-      status: res.status,
-      proxy: data,
-    };
-  }
-
-  return {
-    ok: true,
-    query: data.query || opts.q,
-    results: Array.isArray(data.results) ? data.results : [],
-  };
+function getParams(req: Request) {
+  const u = new URL(req.url);
+  const q = u.searchParams.get("q") || "";
+  const n = Number(u.searchParams.get("n") || "5") || 5;
+  const domains = parseDomains(u.searchParams.get("domains"));
+  return { q, n, domains };
 }
 
 export async function GET(req: Request) {
   try {
-    const u = new URL(req.url);
-    const q = safeStr(u.searchParams.get('q'));
-    const n = Number(u.searchParams.get('n') || '5');
-    const domainsParam = safeStr(u.searchParams.get('domains') || '');
-    const domains = domainsParam ? splitDomains(domainsParam) : [];
-
-    if (!q) {
-      return NextResponse.json({ ok: false, error: 'q_is_required' }, { status: 400 });
-    }
-
-    const out = await callProxySearch({ q, n, domains });
-    return NextResponse.json(out, { status: out.ok ? 200 : 500 });
-  } catch (err: any) {
-    return NextResponse.json({ ok: false, error: err?.message || 'Erro interno' }, { status: 500 });
+    const { q, n, domains } = getParams(req);
+    const results = await searxngSearch(q, n, domains);
+    return NextResponse.json({ ok: true, query: q, results });
+  } catch (e: any) {
+    return NextResponse.json({ ok: false, error: e?.message || "error" }, { status: 500 });
   }
 }
 
 export async function POST(req: Request) {
+  // também aceita body JSON opcional: { q, n, domains }
   try {
-    const body = await req.json().catch(() => ({}));
-    const q = safeStr(body?.q);
-    const n = Number(body?.n || 5);
-    const domainsParam = safeStr(body?.domains || '');
-    const domains = domainsParam ? splitDomains(domainsParam) : [];
+    let q = "";
+    let n = 5;
+    let domains: string[] = [];
 
-    if (!q) {
-      return NextResponse.json({ ok: false, error: 'q_is_required' }, { status: 400 });
+    // 1) tenta body
+    try {
+      const body = await req.json();
+      q = String(body?.q || "");
+      n = Number(body?.n || 5) || 5;
+      domains = Array.isArray(body?.domains) ? body.domains.map(String) : [];
+    } catch {
+      // ignora
     }
 
-    const out = await callProxySearch({ q, n, domains });
-    return NextResponse.json(out, { status: out.ok ? 200 : 500 });
-  } catch (err: any) {
-    return NextResponse.json({ ok: false, error: err?.message || 'Erro interno' }, { status: 500 });
+    // 2) override por querystring se existir
+    const qp = getParams(req);
+    if (qp.q) q = qp.q;
+    if (qp.n) n = qp.n;
+    if (qp.domains.length > 0) domains = qp.domains;
+
+    const results = await searxngSearch(q, n, domains);
+    return NextResponse.json({ ok: true, query: q, results });
+  } catch (e: any) {
+    return NextResponse.json({ ok: false, error: e?.message || "error" }, { status: 500 });
   }
 }
