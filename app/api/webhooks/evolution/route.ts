@@ -1,16 +1,5 @@
 import { NextResponse } from "next/server";
 
-/**
- * Webhook da Evolution API (via relay).
- * Recebe eventos e, quando for uma mensagem inbound (fromMe=false),
- * chama o motor do bot em /api/bot/reply no DOMÍNIO CANÓNICO.
- *
- * ENV:
- * - TRATATUDO_RELAY_SECRET  (obrigatório)
- * - APP_BASE_URL            (recomendado) ex: https://trata-tudo-dashbord.vercel.app
- * - TRATATUDO_API_KEY       (opcional, se /api/bot/reply precisar)
- */
-
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
@@ -24,7 +13,6 @@ function json(data: any, status = 200) {
 }
 
 function getBaseUrlFromRequest(req: Request) {
-  // fallback seguro, caso APP_BASE_URL não exista
   const host = req.headers.get("x-forwarded-host") || req.headers.get("host") || "";
   const proto = req.headers.get("x-forwarded-proto") || "https";
   if (!host) return "";
@@ -33,9 +21,8 @@ function getBaseUrlFromRequest(req: Request) {
 
 function getCanonicalBaseUrl(req: Request) {
   const envBase = safeStr(process.env.APP_BASE_URL);
-  if (envBase) return envBase.replace(/\/+$/, ""); // remove trailing slash
-  const reqBase = getBaseUrlFromRequest(req);
-  return reqBase.replace(/\/+$/, "");
+  if (envBase) return envBase.replace(/\/+$/, "");
+  return getBaseUrlFromRequest(req).replace(/\/+$/, "");
 }
 
 function validateRelaySecret(req: Request) {
@@ -57,9 +44,47 @@ function normalizeE164FromRemoteJid(remoteJid: string) {
   return num.startsWith("+") ? num : `+${num}`;
 }
 
+function extractTextFromEvolutionPayload(p: any) {
+  return (
+    safeStr(p?.data?.message?.conversation) ||
+    safeStr(p?.data?.message?.extendedTextMessage?.text) ||
+    safeStr(p?.data?.message?.imageMessage?.caption) ||
+    ""
+  );
+}
+
+async function sendTextViaEvolution(instance: string, toE164: string, text: string) {
+  const evoUrl = safeStr(process.env.EVOLUTION_SERVER_URL).replace(/\/+$/, "");
+  const evoKey = safeStr(process.env.EVOLUTION_API_KEY);
+
+  if (!evoUrl || !evoKey) {
+    return { ok: false, status: 0, raw: "missing_EVOLUTION_SERVER_URL_or_EVOLUTION_API_KEY" };
+  }
+
+  // Evolution espera number sem "+" normalmente; mas aceita em muitos setups.
+  // Para ficar consistente, removo "+" aqui:
+  const number = toE164.replace(/^\+/, "");
+
+  const url = `${evoUrl}/message/sendText/${encodeURIComponent(instance)}`;
+
+  const res = await fetch(url, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      apikey: evoKey,
+    },
+    body: JSON.stringify({
+      number,
+      text,
+    }),
+  });
+
+  const raw = await res.text();
+  return { ok: res.ok, status: res.status, raw: raw.slice(0, 400) };
+}
+
 export async function POST(req: Request) {
   try {
-    // 1) validar segredo do relay (?s=...)
     const v = validateRelaySecret(req);
     if (!v.ok) return json({ ok: false, error: v.error }, 401);
 
@@ -68,26 +93,17 @@ export async function POST(req: Request) {
 
     const event = safeStr(payload.event);
     const instance = safeStr(payload.instance);
-    const data = payload.data || {};
-    const pushName = safeStr(data.pushName || payload.pushName || "");
+    const fromMe = Boolean(payload?.data?.key?.fromMe);
 
-    // Apenas mensagens inbound:
-    // event: messages.upsert
-    // data.key.fromMe === false
-    const fromMe = Boolean(data?.key?.fromMe);
+    // Só processa inbound
     if (event !== "messages.upsert" || fromMe) {
       return json({ ok: true, ignored: true, reason: "not_inbound_message" });
     }
 
-    const remoteJid = safeStr(data?.key?.remoteJid);
+    const remoteJid = safeStr(payload?.data?.key?.remoteJid);
     const phone_e164 = normalizeE164FromRemoteJid(remoteJid);
-
-    // Extrair texto (suporta conversation e extendedTextMessage)
-    const text =
-      safeStr(data?.message?.conversation) ||
-      safeStr(data?.message?.extendedTextMessage?.text) ||
-      safeStr(data?.message?.imageMessage?.caption) ||
-      "";
+    const pushName = safeStr(payload?.data?.pushName || payload?.pushName || "");
+    const text = extractTextFromEvolutionPayload(payload);
 
     if (!phone_e164 || !text) {
       return json({
@@ -98,24 +114,20 @@ export async function POST(req: Request) {
       });
     }
 
-    /**
-     * ⚠️ Aqui está a parte crítica:
-     * chamamos SEMPRE o bot no domínio canónico (APP_BASE_URL),
-     * e nunca em URLs de preview/deployment.
-     */
     const baseUrl = getCanonicalBaseUrl(req);
-    if (!baseUrl) {
-      return json({ ok: false, error: "missing_base_url" }, 500);
-    }
+    if (!baseUrl) return json({ ok: false, error: "missing_base_url" }, 500);
 
+    // ⚠️ Aqui está o ponto do teu “testar o prompt do cliente no meu número”
+    // O webhook recebe o remoteJid (número do cidadão). O client_id deve ser resolvido por:
+    // - instância (TrataTudo bot vs client-6), OU
+    // - tabela de "hub numbers -> client_id", OU
+    // - override de teste (ver nota em baixo)
+    //
+    // Por agora mantém simples: se vier client_id, usa; senão fallback.
+    const client_id = Number(payload?.client_id || payload?.data?.client_id || 1);
+
+    // 1) gerar reply no teu bot
     const botUrl = `${baseUrl}/api/bot/reply`;
-
-    // Determinar client_id:
-    // - Se já envias client_id no webhook, usa-o
-    // - Senão, usa o 1 por defeito (ajusta se quiseres mapear por instance/numero)
-    const client_id = Number(payload?.client_id || data?.client_id || 1);
-
-    // Se /api/bot/reply exigir API key server-to-server, manda-a.
     const apiKey = safeStr(process.env.TRATATUDO_API_KEY);
 
     const botRes = await fetch(botUrl, {
@@ -129,15 +141,12 @@ export async function POST(req: Request) {
         phone_e164,
         push_name: pushName || undefined,
         text,
-        // podes enviar também instance se quiseres usar no /api/bot/reply
         instance_name: instance || undefined,
         source: "webhook:evolution",
       }),
     });
 
     const botRaw = await botRes.text();
-    const botRawPreview = botRaw.slice(0, 240);
-
     let botJson: any = null;
     try {
       botJson = JSON.parse(botRaw);
@@ -154,19 +163,34 @@ export async function POST(req: Request) {
         phone_e164,
         bot_status: botRes.status,
         bot_ok: Boolean(botJson?.ok),
-        bot_raw_preview: botRawPreview,
+        bot_raw_preview: botRaw.slice(0, 240),
         bot_url_used: botUrl,
       });
     }
 
-    // Se o bot respondeu, consideramos handled.
+    const reply = safeStr(botJson?.data?.reply);
+    if (!reply) {
+      return json({
+        ok: true,
+        handled: false,
+        reason: "empty_reply",
+        client_id,
+        phone_e164,
+      });
+    }
+
+    // 2) enviar reply pelo Evolution (isto é o que te falta agora)
+    const send = await sendTextViaEvolution(instance, phone_e164, reply);
+
     return json({
       ok: true,
       handled: true,
       client_id,
       phone_e164,
-      reply_preview: safeStr(botJson?.data?.reply).slice(0, 180),
-      bot_url_used: botUrl,
+      reply_preview: reply.slice(0, 180),
+      evolution_send_ok: send.ok,
+      evolution_status: send.status,
+      evolution_raw_preview: send.raw,
     });
   } catch (e: any) {
     return json({ ok: false, error: e?.message || "internal_error" }, 500);
