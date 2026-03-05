@@ -1,28 +1,31 @@
-import { NextResponse, type NextRequest } from 'next/server';
-import { createServerClient } from '@supabase/ssr';
+import { NextResponse, type NextRequest } from "next/server";
+import { createServerClient } from "@supabase/ssr";
 
 export async function middleware(req: NextRequest) {
-  const res = NextResponse.next();
+  // Deixa passar ficheiros estáticos e rotas públicas
   const { pathname } = req.nextUrl;
 
-  // Rotas públicas e assets
+  const PUBLIC_PATHS = [
+    "/login",
+    "/reset-password",
+    "/api/health",
+    "/api/diagnostics/env",
+    "/_next",
+    "/favicon.ico",
+  ];
+
   const isPublic =
-    pathname.startsWith('/login') ||
-    pathname.startsWith('/reset-password') ||
-    pathname.startsWith('/api') ||
-    pathname.startsWith('/_next') ||
-    pathname.startsWith('/favicon') ||
-    pathname.startsWith('/robots') ||
-    pathname.startsWith('/sitemap');
+    PUBLIC_PATHS.some((p) => pathname === p || pathname.startsWith(p)) ||
+    pathname.startsWith("/api/"); // <- não bloqueia API (importantíssimo)
 
-  if (isPublic) return res;
-
-  // Só proteger /app
-  if (!pathname.startsWith('/app')) return res;
+  // Cria response “mutável” para cookies
+  let res = NextResponse.next({
+    request: { headers: req.headers },
+  });
 
   const supabase = createServerClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL || '',
-    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || '',
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
     {
       cookies: {
         getAll() {
@@ -37,19 +40,25 @@ export async function middleware(req: NextRequest) {
     }
   );
 
-  const { data } = await supabase.auth.getSession();
-  const session = data.session;
+  // Atualiza sessão (refresh automático + escreve cookies no response)
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
 
-  if (!session) {
+  // Se é /app* e não há user -> manda para login
+  if (pathname.startsWith("/app") && !user) {
     const url = req.nextUrl.clone();
-    url.pathname = '/login';
-    url.searchParams.set('next', pathname);
+    url.pathname = "/login";
+    url.searchParams.set("next", pathname);
     return NextResponse.redirect(url);
   }
+
+  // Se é público, segue
+  if (isPublic) return res;
 
   return res;
 }
 
 export const config = {
-  matcher: ['/app/:path*'],
+  matcher: ["/((?!_next/static|_next/image|favicon.ico).*)"],
 };
