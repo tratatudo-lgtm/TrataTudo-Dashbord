@@ -1,185 +1,114 @@
-// lib/evolution.ts
-// Wrapper completo para Evolution API usado pelo TrataTudo
-
-type EvoResult<T = any> = {
+export type EvoResult<T=any> = {
   ok: boolean;
   status: number;
   data?: T;
-  raw?: string;
+  error?: string;
+  raw?: any;
 };
 
-function cleanUrl(u: string) {
-  return (u || '').trim().replace(/\/+$/, '');
+function mustEnv(name: string) {
+  const v = process.env[name] || '';
+  if (!v) throw new Error(`missing_${name}`);
+  return v;
 }
 
-export function getEvolutionEnv() {
-  const url =
-    cleanUrl(process.env.EVOLUTION_SERVER_URL || process.env.SERVER_URL || '');
-  const key =
-    (process.env.EVOLUTION_API_KEY || process.env.AUTHENTICATION_API_KEY || '').trim();
-
-  return { url, key, ok: !!url && !!key };
+function baseUrl() {
+  return mustEnv('EVOLUTION_SERVER_URL').replace(/\/+$/, '');
 }
 
-async function evoFetch<T = any>(
-  path: string,
-  opts?: { method?: string; body?: any; headers?: Record<string, string> }
-): Promise<EvoResult<T>> {
+function apiKey() {
+  return mustEnv('EVOLUTION_API_KEY');
+}
 
-  const { url, key, ok } = getEvolutionEnv();
+async function evoFetch(path: string, init?: RequestInit): Promise<EvoResult> {
+  const url = `${baseUrl()}${path.startsWith('/') ? '' : '/'}${path}`;
+  const res = await fetch(url, {
+    ...init,
+    headers: {
+      'content-type': 'application/json',
+      apikey: apiKey(),
+      ...(init?.headers || {}),
+    },
+  });
 
-  if (!ok) {
-    return {
-      ok: false,
-      status: 0,
-      raw: 'missing_EVOLUTION_SERVER_URL_or_EVOLUTION_API_KEY',
-    };
+  const txt = await res.text();
+  let json: any = null;
+  try { json = JSON.parse(txt); } catch { json = null; }
+
+  if (!res.ok) {
+    return { ok: false, status: res.status, error: json?.message || txt || 'evolution_error', raw: json ?? txt };
   }
 
-  const endpoint = `${url}${path.startsWith('/') ? '' : '/'}${path}`;
-
-  try {
-
-    const res = await fetch(endpoint, {
-      method: opts?.method || 'GET',
-      headers: {
-        'Content-Type': 'application/json',
-        apikey: key,
-        ...(opts?.headers || {}),
-      },
-      body: opts?.body ? JSON.stringify(opts.body) : undefined,
-    });
-
-    const raw = await res.text();
-
-    let data: any = undefined;
-
-    try {
-      data = raw ? JSON.parse(raw) : undefined;
-    } catch {}
-
-    return {
-      ok: res.ok,
-      status: res.status,
-      data,
-      raw,
-    };
-
-  } catch (e: any) {
-
-    return {
-      ok: false,
-      status: 0,
-      raw: e?.message || 'fetch_failed',
-    };
-
-  }
+  return { ok: true, status: res.status, data: json ?? txt, raw: json ?? txt };
 }
 
-/*
-LISTAR INSTÂNCIAS
-*/
-export async function fetchEvolutionInstances() {
-  return evoFetch('/instance/fetchInstances', { method: 'GET' });
-}
-
-/*
-CRIAR INSTÂNCIA
-*/
-export async function createEvolutionInstance(params: {
-  name: string;
-  webhook?: string;
-  webhookEnabled?: boolean;
-}) {
-
-  return evoFetch('/instance/create', {
+/**
+ * Cria uma instância
+ * Endpoint Evolution pode variar; este formato é compatível com configs comuns.
+ */
+export async function createEvolutionInstance(instanceName: string): Promise<EvoResult> {
+  return evoFetch(`/instance/create`, {
     method: 'POST',
-    body: {
-      instanceName: params.name,
-      webhook: params.webhook,
-      webhookEnabled: params.webhookEnabled ?? true,
-    },
+    body: JSON.stringify({
+      instanceName,
+      token: instanceName, // alguns setups exigem token; usamos instanceName
+    }),
   });
-
 }
 
-/*
-QR CODE DA INSTÂNCIA
-*/
-export async function getEvolutionInstanceQR(name: string) {
+/**
+ * Configura webhook da instância para o teu RELAY
+ */
+export async function setEvolutionInstanceWebhook(instanceName: string): Promise<EvoResult> {
+  const webhookUrl = mustEnv('EVOLUTION_WEBHOOK_URL');
+  return evoFetch(`/webhook/set/${encodeURIComponent(instanceName)}`, {
+    method: 'POST',
+    body: JSON.stringify({
+      url: webhookUrl,
+      enabled: true,
+      events: [
+        'messages.upsert',
+        'messages.update',
+        'send.message',
+        'connection.update',
+      ],
+    }),
+  });
+}
 
-  return evoFetch(`/instance/connect/${encodeURIComponent(name)}`, {
+/**
+ * Pede QR para conectar
+ */
+export async function getEvolutionInstanceQR(instanceName: string): Promise<EvoResult> {
+  return evoFetch(`/instance/connect/${encodeURIComponent(instanceName)}`, {
     method: 'GET',
   });
-
 }
 
-/*
-STATUS DA INSTÂNCIA
-*/
-export async function getEvolutionInstanceStatus(name: string) {
-
-  return evoFetch(`/instance/connectionState/${encodeURIComponent(name)}`, {
+/**
+ * Pairing code (se o teu Evolution suportar)
+ * Algumas versões usam /instance/pairingCode/:name e apenas 1 argumento.
+ */
+export async function getEvolutionPairingCode(instanceName: string): Promise<EvoResult> {
+  return evoFetch(`/instance/pairingCode/${encodeURIComponent(instanceName)}`, {
     method: 'GET',
   });
-
 }
 
-/*
-DEFINIR WEBHOOK
-*/
-export async function setEvolutionInstanceWebhook(params: {
-  name: string;
-  url: string;
-  enabled?: boolean;
-}) {
-
-  return evoFetch(`/webhook/set/${encodeURIComponent(params.name)}`, {
-    method: 'POST',
-    body: {
-      url: params.url,
-      enabled: params.enabled ?? true,
-    },
+/**
+ * Status da instância
+ */
+export async function getEvolutionInstanceStatus(instanceName: string): Promise<EvoResult> {
+  return evoFetch(`/instance/status/${encodeURIComponent(instanceName)}`, {
+    method: 'GET',
   });
-
 }
 
-/*
-PAIRING CODE
-AGORA SUPORTA 2 ARGUMENTOS
-*/
-export async function getEvolutionPairingCode(
-  name: string,
-  phone_e164?: string
-) {
-
-  const phone = (phone_e164 || '').trim();
-  const number = phone.replace(/[^\d]/g, '');
-
-  return evoFetch(`/instance/pairingCode/${encodeURIComponent(name)}`, {
-    method: 'POST',
-    body: number ? { number } : {},
+/**
+ * Lista instâncias
+ */
+export async function fetchEvolutionInstances(): Promise<EvoResult> {
+  return evoFetch(`/instance/fetchInstances`, {
+    method: 'GET',
   });
-
-}
-
-/*
-ENVIAR MENSAGEM WHATSAPP
-*/
-export async function evolutionSendText(params: {
-  instance: string;
-  to_e164: string;
-  text: string;
-}) {
-
-  const number = params.to_e164.replace(/^\+/, '');
-
-  return evoFetch(`/message/sendText/${encodeURIComponent(params.instance)}`, {
-    method: 'POST',
-    body: {
-      number,
-      text: params.text,
-    },
-  });
-
 }
