@@ -1,6 +1,5 @@
 // lib/evolution.ts
-// Wrapper único para a Evolution API.
-// Mantém compatibilidade com as rotas existentes do teu projeto + adiciona sendText.
+// Wrapper completo para Evolution API usado pelo TrataTudo
 
 type EvoResult<T = any> = {
   ok: boolean;
@@ -26,7 +25,9 @@ async function evoFetch<T = any>(
   path: string,
   opts?: { method?: string; body?: any; headers?: Record<string, string> }
 ): Promise<EvoResult<T>> {
+
   const { url, key, ok } = getEvolutionEnv();
+
   if (!ok) {
     return {
       ok: false,
@@ -38,6 +39,7 @@ async function evoFetch<T = any>(
   const endpoint = `${url}${path.startsWith('/') ? '' : '/'}${path}`;
 
   try {
+
     const res = await fetch(endpoint, {
       method: opts?.method || 'GET',
       headers: {
@@ -49,40 +51,47 @@ async function evoFetch<T = any>(
     });
 
     const raw = await res.text();
+
     let data: any = undefined;
+
     try {
       data = raw ? JSON.parse(raw) : undefined;
-    } catch {
-      // keep raw
-    }
+    } catch {}
 
-    return { ok: res.ok, status: res.status, data, raw };
+    return {
+      ok: res.ok,
+      status: res.status,
+      data,
+      raw,
+    };
+
   } catch (e: any) {
-    return { ok: false, status: 0, raw: e?.message || 'fetch_failed' };
+
+    return {
+      ok: false,
+      status: 0,
+      raw: e?.message || 'fetch_failed',
+    };
+
   }
 }
 
-/**
- * LISTAR INSTÂNCIAS
- * Usado por: app/api/evolution/instances/route.ts
- */
+/*
+LISTAR INSTÂNCIAS
+*/
 export async function fetchEvolutionInstances() {
-  // endpoint comum: GET /instance/fetchInstances
-  // (se a tua versão tiver outro, ajusta aqui)
   return evoFetch('/instance/fetchInstances', { method: 'GET' });
 }
 
-/**
- * CRIAR INSTÂNCIA
- * Usado por: app/api/evolution/instances/route.ts
- */
+/*
+CRIAR INSTÂNCIA
+*/
 export async function createEvolutionInstance(params: {
   name: string;
   webhook?: string;
   webhookEnabled?: boolean;
 }) {
-  // endpoint comum: POST /instance/create
-  // body típico: { instanceName, ... }
+
   return evoFetch('/instance/create', {
     method: 'POST',
     body: {
@@ -91,39 +100,40 @@ export async function createEvolutionInstance(params: {
       webhookEnabled: params.webhookEnabled ?? true,
     },
   });
+
 }
 
-/**
- * QR DA INSTÂNCIA
- * Usado por: app/api/evolution/instances/[name]/qr/route.ts
- */
+/*
+QR CODE DA INSTÂNCIA
+*/
 export async function getEvolutionInstanceQR(name: string) {
-  // endpoint comum: GET /instance/connect/:name
-  // algumas versões: /instance/connect/<name>
-  return evoFetch(`/instance/connect/${encodeURIComponent(name)}`, { method: 'GET' });
+
+  return evoFetch(`/instance/connect/${encodeURIComponent(name)}`, {
+    method: 'GET',
+  });
+
 }
 
-/**
- * STATUS DA INSTÂNCIA
- * Usado por: app/api/evolution/instances/[name]/status/route.ts
- */
+/*
+STATUS DA INSTÂNCIA
+*/
 export async function getEvolutionInstanceStatus(name: string) {
-  // endpoint comum: GET /instance/connectionState/:name
+
   return evoFetch(`/instance/connectionState/${encodeURIComponent(name)}`, {
     method: 'GET',
   });
+
 }
 
-/**
- * DEFINIR WEBHOOK DA INSTÂNCIA
- * Usado por: app/api/evolution/instances/[name]/webhook/route.ts
- */
+/*
+DEFINIR WEBHOOK
+*/
 export async function setEvolutionInstanceWebhook(params: {
   name: string;
   url: string;
   enabled?: boolean;
 }) {
-  // endpoint comum: POST /webhook/set/:name
+
   return evoFetch(`/webhook/set/${encodeURIComponent(params.name)}`, {
     method: 'POST',
     body: {
@@ -131,33 +141,45 @@ export async function setEvolutionInstanceWebhook(params: {
       enabled: params.enabled ?? true,
     },
   });
+
 }
 
-/**
- * PAIRING CODE (se a tua UI usa "pairing" em vez de QR)
- * Usado por: app/api/evolution/instances/[name]/pairing/route.ts
- */
-export async function getEvolutionPairingCode(name: string) {
-  // endpoint comum em algumas versões: GET /instance/pairingCode/:name
-  // se não existir, devolve ok:false com raw do servidor
+/*
+PAIRING CODE
+AGORA SUPORTA 2 ARGUMENTOS
+*/
+export async function getEvolutionPairingCode(
+  name: string,
+  phone_e164?: string
+) {
+
+  const phone = (phone_e164 || '').trim();
+  const number = phone.replace(/[^\d]/g, '');
+
   return evoFetch(`/instance/pairingCode/${encodeURIComponent(name)}`, {
-    method: 'GET',
+    method: 'POST',
+    body: number ? { number } : {},
   });
+
 }
 
-/**
- * ENVIAR TEXTO (WhatsApp)
- * Usado pelo webhook para responder ao utilizador.
- */
+/*
+ENVIAR MENSAGEM WHATSAPP
+*/
 export async function evolutionSendText(params: {
   instance: string;
-  to_e164: string; // "+3519..."
+  to_e164: string;
   text: string;
 }) {
-  // endpoint comum: POST /message/sendText/:instance
+
   const number = params.to_e164.replace(/^\+/, '');
+
   return evoFetch(`/message/sendText/${encodeURIComponent(params.instance)}`, {
     method: 'POST',
-    body: { number, text: params.text },
+    body: {
+      number,
+      text: params.text,
+    },
   });
+
 }
