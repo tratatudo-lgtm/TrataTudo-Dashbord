@@ -1,138 +1,99 @@
-'use client';
+// app/login/page.tsx
+import { redirect } from 'next/navigation';
+import { createClient } from '@/lib/supabase/server';
 
-import { Suspense, useMemo, useState } from "react";
-import { useRouter, useSearchParams } from "next/navigation";
+type Props = {
+  searchParams?: { next?: string };
+};
 
-function LoginForm() {
-  const router = useRouter();
-  const search = useSearchParams();
+export default function LoginPage({ searchParams }: Props) {
+  async function signIn(formData: FormData) {
+    'use server';
 
-  const nextPath = useMemo(() => {
-    const n = search.get("next");
-    return n && n.startsWith("/") ? n : "/app";
-  }, [search]);
+    const email = String(formData.get('email') || '').trim();
+    const password = String(formData.get('password') || '').trim();
+    const next = (searchParams?.next || '/app').toString();
 
-  const [email, setEmail] = useState("");
-  const [password, setPassword] = useState("");
-  const [loading, setLoading] = useState(false);
-  const [err, setErr] = useState<string | null>(null);
-
-  async function onSubmit(e: React.FormEvent) {
-    e.preventDefault();
-    setErr(null);
-    setLoading(true);
-
-    try {
-      const res = await fetch("/api/auth/login", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        credentials: "include",
-        body: JSON.stringify({ email, password }),
-      });
-
-      const data = await res.json().catch(() => null);
-
-      if (!res.ok || !data?.ok) {
-        setErr(data?.error || "Credenciais inválidas");
-        setLoading(false);
-        return;
-      }
-
-      router.replace(nextPath);
-      router.refresh();
-    } catch (e: any) {
-      setErr(e?.message || "Erro no login");
-    } finally {
-      setLoading(false);
+    if (!email || !password) {
+      redirect(`/login?next=${encodeURIComponent(next)}&error=missing`);
     }
+
+    const supabase = createClient();
+
+    const { error } = await supabase.auth.signInWithPassword({
+      email,
+      password,
+    });
+
+    if (error) {
+      redirect(`/login?next=${encodeURIComponent(next)}&error=invalid`);
+    }
+
+    // Aqui a cookie é criada SERVER-SIDE (muito mais fiável)
+    redirect(next);
   }
 
+  const next = searchParams?.next || '/app';
+  const error = searchParams?.error;
+
   return (
-    <div style={styles.page}>
-      <div style={styles.card}>
-        <h1 style={styles.title}>TrataTudo</h1>
+    <div className="min-h-screen flex items-center justify-center bg-neutral-50 px-4">
+      <div className="w-full max-w-md rounded-2xl bg-white shadow p-6">
+        <h1 className="text-2xl font-semibold">TrataTudo — Login</h1>
+        <p className="text-sm text-neutral-600 mt-1">
+          Entra para acederes à dashboard.
+        </p>
 
-        <form onSubmit={onSubmit} style={styles.form}>
-          <input
-            style={styles.input}
-            placeholder="Email"
-            type="email"
-            value={email}
-            onChange={(e) => setEmail(e.target.value)}
-            required
-          />
+        {error === 'invalid' && (
+          <div className="mt-4 rounded-lg bg-red-50 text-red-700 text-sm p-3">
+            Email ou password inválidos.
+          </div>
+        )}
+        {error === 'missing' && (
+          <div className="mt-4 rounded-lg bg-amber-50 text-amber-800 text-sm p-3">
+            Preenche email e password.
+          </div>
+        )}
 
-          <input
-            style={styles.input}
-            placeholder="Password"
-            type="password"
-            value={password}
-            onChange={(e) => setPassword(e.target.value)}
-            required
-          />
+        <form action={signIn} className="mt-6 space-y-3">
+          <input type="hidden" name="next" value={next} />
 
-          {err && <div style={styles.error}>{err}</div>}
+          <div>
+            <label className="block text-sm font-medium">Email</label>
+            <input
+              name="email"
+              type="email"
+              autoComplete="email"
+              className="mt-1 w-full rounded-lg border border-neutral-300 px-3 py-2 outline-none focus:ring-2 focus:ring-neutral-900"
+              placeholder="teu@email.com"
+              required
+            />
+          </div>
 
-          <button style={styles.button} disabled={loading}>
-            {loading ? "A entrar..." : "Entrar"}
+          <div>
+            <label className="block text-sm font-medium">Password</label>
+            <input
+              name="password"
+              type="password"
+              autoComplete="current-password"
+              className="mt-1 w-full rounded-lg border border-neutral-300 px-3 py-2 outline-none focus:ring-2 focus:ring-neutral-900"
+              placeholder="••••••••"
+              required
+            />
+          </div>
+
+          <button
+            type="submit"
+            className="w-full rounded-lg bg-neutral-900 text-white py-2 font-medium active:scale-[0.99]"
+          >
+            Entrar
           </button>
+
+          <div className="text-xs text-neutral-500 pt-2">
+            Se voltares ao login, é porque o browser bloqueou cookies. (Samsung Internet às vezes faz isso.)
+          </div>
         </form>
       </div>
     </div>
   );
 }
-
-export default function Page() {
-  return (
-    <Suspense fallback={<div style={{padding:20}}>Carregar...</div>}>
-      <LoginForm />
-    </Suspense>
-  );
-}
-
-const styles: Record<string, React.CSSProperties> = {
-  page: {
-    minHeight: "100vh",
-    display: "grid",
-    placeItems: "center",
-    background: "#0b1220",
-  },
-  card: {
-    background: "#111a2e",
-    padding: 24,
-    borderRadius: 16,
-    width: "100%",
-    maxWidth: 420,
-    color: "white",
-  },
-  title: {
-    fontSize: 22,
-    fontWeight: 700,
-    marginBottom: 16,
-  },
-  form: {
-    display: "grid",
-    gap: 12,
-  },
-  input: {
-    height: 42,
-    padding: "0 12px",
-    borderRadius: 10,
-    border: "1px solid #2a334a",
-    background: "#0b1220",
-    color: "white",
-  },
-  button: {
-    height: 44,
-    borderRadius: 10,
-    border: "none",
-    background: "#2563eb",
-    color: "white",
-    fontWeight: 600,
-    cursor: "pointer",
-  },
-  error: {
-    color: "#f87171",
-    fontSize: 13,
-  },
-};
