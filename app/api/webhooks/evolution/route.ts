@@ -1,148 +1,127 @@
-import { NextResponse } from "next/server";
+// app/api/webhooks/evolution/route.ts
+import { NextResponse } from 'next/server';
+import { createClient } from '@/lib/supabase/server';
+import { evolutionSendText } from '@/lib/evolution';
 
-export const runtime = "nodejs";
-export const dynamic = "force-dynamic";
+export const runtime = 'nodejs';
+export const dynamic = 'force-dynamic';
 
 function safeStr(v: any) {
-  if (v === null || v === undefined) return "";
+  if (v === null || v === undefined) return '';
   return String(v).trim();
 }
 
-function json(data: any, status = 200) {
-  return NextResponse.json(data, { status });
+function normalizeE164FromJid(remoteJid: string) {
+  // "3519...@s.whatsapp.net" -> "+3519..."
+  const num = safeStr(remoteJid).split('@')[0].replace(/\D/g, '');
+  return num ? `+${num}` : '';
 }
 
-function getBaseUrlFromRequest(req: Request) {
-  const host = req.headers.get("x-forwarded-host") || req.headers.get("host") || "";
-  const proto = req.headers.get("x-forwarded-proto") || "https";
-  if (!host) return "";
-  return `${proto}://${host}`;
+function extractTextFromEvolutionPayload(body: any) {
+  // suporta conversation e extendedTextMessage.text
+  const msg = body?.data?.message || {};
+  const conv = safeStr(msg?.conversation);
+  if (conv) return conv;
+
+  const ext = safeStr(msg?.extendedTextMessage?.text);
+  if (ext) return ext;
+
+  return '';
 }
 
-function getCanonicalBaseUrl(req: Request) {
-  const envBase = safeStr(process.env.APP_BASE_URL);
-  if (envBase) return envBase.replace(/\/+$/, "");
-  return getBaseUrlFromRequest(req).replace(/\/+$/, "");
-}
+async function getClientByPhoneOrInstance(supabase: any, phone_e164: string, instance: string) {
+  // regra simples: tenta por telefone primeiro, senão por instância
+  // (ajusta se a tua tabela tiver campos diferentes)
+  const { data: byPhone } = await supabase
+    .from('clients')
+    .select('id, status, trial_end, instance_name')
+    .eq('phone_e164', phone_e164)
+    .limit(1);
 
-function validateRelaySecret(req: Request) {
-  const secret = safeStr(process.env.TRATATUDO_RELAY_SECRET);
-  if (!secret) return { ok: false, error: "missing_env_TRATATUDO_RELAY_SECRET" };
+  if (byPhone?.[0]) return byPhone[0];
 
-  const url = new URL(req.url);
-  const s = safeStr(url.searchParams.get("s"));
-  if (!s || s !== secret) return { ok: false, error: "invalid_relay_secret" };
+  const { data: byInstance } = await supabase
+    .from('clients')
+    .select('id, status, trial_end, instance_name')
+    .eq('instance_name', instance)
+    .limit(1);
 
-  return { ok: true };
-}
+  if (byInstance?.[0]) return byInstance[0];
 
-function normalizeE164FromRemoteJid(remoteJid: string) {
-  // "3519xxxx@s.whatsapp.net" -> "+3519xxxx"
-  const jid = safeStr(remoteJid);
-  const num = jid.split("@")[0] || "";
-  if (!num) return "";
-  return num.startsWith("+") ? num : `+${num}`;
-}
-
-function extractTextFromEvolutionPayload(p: any) {
-  return (
-    safeStr(p?.data?.message?.conversation) ||
-    safeStr(p?.data?.message?.extendedTextMessage?.text) ||
-    safeStr(p?.data?.message?.imageMessage?.caption) ||
-    ""
-  );
-}
-
-async function sendTextViaEvolution(instance: string, toE164: string, text: string) {
-  const evoUrl = safeStr(process.env.EVOLUTION_SERVER_URL).replace(/\/+$/, "");
-  const evoKey = safeStr(process.env.EVOLUTION_API_KEY);
-
-  if (!evoUrl || !evoKey) {
-    return { ok: false, status: 0, raw: "missing_EVOLUTION_SERVER_URL_or_EVOLUTION_API_KEY" };
-  }
-
-  // Evolution espera number sem "+" normalmente; mas aceita em muitos setups.
-  // Para ficar consistente, removo "+" aqui:
-  const number = toE164.replace(/^\+/, "");
-
-  const url = `${evoUrl}/message/sendText/${encodeURIComponent(instance)}`;
-
-  const res = await fetch(url, {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      apikey: evoKey,
-    },
-    body: JSON.stringify({
-      number,
-      text,
-    }),
-  });
-
-  const raw = await res.text();
-  return { ok: res.ok, status: res.status, raw: raw.slice(0, 400) };
+  return null;
 }
 
 export async function POST(req: Request) {
   try {
-    const v = validateRelaySecret(req);
-    if (!v.ok) return json({ ok: false, error: v.error }, 401);
+    const secret = safeStr(new URL(req.url).searchParams.get('s'));
+    const expected = safeStr(process.env.TRATATUDO_RELAY_SECRET);
 
-    const payload = await req.json().catch(() => null);
-    if (!payload) return json({ ok: false, error: "invalid_json" }, 400);
-
-    const event = safeStr(payload.event);
-    const instance = safeStr(payload.instance);
-    const fromMe = Boolean(payload?.data?.key?.fromMe);
-
-    // Só processa inbound
-    if (event !== "messages.upsert" || fromMe) {
-      return json({ ok: true, ignored: true, reason: "not_inbound_message" });
+    // se tiveres secret, valida
+    if (expected && secret !== expected) {
+      return NextResponse.json({ ok: false, error: 'invalid_secret' }, { status: 401 });
     }
 
-    const remoteJid = safeStr(payload?.data?.key?.remoteJid);
-    const phone_e164 = normalizeE164FromRemoteJid(remoteJid);
-    const pushName = safeStr(payload?.data?.pushName || payload?.pushName || "");
-    const text = extractTextFromEvolutionPayload(payload);
+    const body = await req.json();
 
+    // só processamos inbound
+    const event = safeStr(body?.event);
+    const instance = safeStr(body?.instance);
+
+    if (event !== 'messages.upsert') {
+      return NextResponse.json({ ok: true, ignored: true });
+    }
+
+    const fromMe = !!body?.data?.key?.fromMe;
+    if (fromMe) {
+      return NextResponse.json({ ok: true, ignored: true, reason: 'from_me' });
+    }
+
+    const remoteJid = safeStr(body?.data?.key?.remoteJid);
+    const phone_e164 = normalizeE164FromJid(remoteJid);
+    const push_name = safeStr(body?.data?.pushName || '');
+
+    const text = extractTextFromEvolutionPayload(body);
     if (!phone_e164 || !text) {
-      return json({
+      return NextResponse.json({
         ok: true,
         handled: false,
-        reason: "missing_phone_or_text",
+        reason: 'missing_phone_or_text',
         phone_e164,
       });
     }
 
-    const baseUrl = getCanonicalBaseUrl(req);
-    if (!baseUrl) return json({ ok: false, error: "missing_base_url" }, 500);
+    const supabase = createClient();
 
-    // ⚠️ Aqui está o ponto do teu “testar o prompt do cliente no meu número”
-    // O webhook recebe o remoteJid (número do cidadão). O client_id deve ser resolvido por:
-    // - instância (TrataTudo bot vs client-6), OU
-    // - tabela de "hub numbers -> client_id", OU
-    // - override de teste (ver nota em baixo)
-    //
-    // Por agora mantém simples: se vier client_id, usa; senão fallback.
-    const client_id = Number(payload?.client_id || payload?.data?.client_id || 1);
+    const client = await getClientByPhoneOrInstance(supabase, phone_e164, instance);
+    const client_id = Number(client?.id || 0);
 
-    // 1) gerar reply no teu bot
-    const botUrl = `${baseUrl}/api/bot/reply`;
-    const apiKey = safeStr(process.env.TRATATUDO_API_KEY);
+    if (!client_id) {
+      return NextResponse.json({
+        ok: true,
+        handled: false,
+        reason: 'client_not_found',
+        phone_e164,
+        instance,
+      });
+    }
 
-    const botRes = await fetch(botUrl, {
-      method: "POST",
+    // chama o bot/reply interno (API route do teu projeto)
+    const baseUrl =
+      safeStr(process.env.NEXT_PUBLIC_SITE_URL) ||
+      'https://trata-tudo-dashbord.vercel.app';
+
+    const botRes = await fetch(`${baseUrl.replace(/\/+$/, '')}/api/bot/reply`, {
+      method: 'POST',
       headers: {
-        "content-type": "application/json",
-        ...(apiKey ? { "X-TrataTudo-Key": apiKey } : {}),
+        'Content-Type': 'application/json',
+        // webhook é server-to-server, usa chave
+        'X-TrataTudo-Key': safeStr(process.env.TRATATUDO_API_KEY),
       },
       body: JSON.stringify({
         client_id,
         phone_e164,
-        push_name: pushName || undefined,
+        push_name,
         text,
-        instance_name: instance || undefined,
-        source: "webhook:evolution",
       }),
     });
 
@@ -150,49 +129,44 @@ export async function POST(req: Request) {
     let botJson: any = null;
     try {
       botJson = JSON.parse(botRaw);
-    } catch {
-      botJson = null;
-    }
+    } catch {}
 
-    if (!botRes.ok || !botJson?.ok) {
-      return json({
+    const reply = safeStr(botJson?.data?.reply);
+
+    if (!botRes.ok || !reply) {
+      return NextResponse.json({
         ok: true,
         handled: false,
-        reason: "bot_no_reply",
+        reason: 'bot_no_reply',
         client_id,
         phone_e164,
         bot_status: botRes.status,
-        bot_ok: Boolean(botJson?.ok),
-        bot_raw_preview: botRaw.slice(0, 240),
-        bot_url_used: botUrl,
+        bot_ok: botRes.ok,
+        bot_raw_preview: botRaw?.slice?.(0, 220) || '',
       });
     }
 
-    const reply = safeStr(botJson?.data?.reply);
-    if (!reply) {
-      return json({
-        ok: true,
-        handled: false,
-        reason: "empty_reply",
-        client_id,
-        phone_e164,
-      });
-    }
+    // envia pelo Evolution
+    const evo = await evolutionSendText({
+      instance: instance || safeStr(client?.instance_name) || 'TrataTudo bot',
+      to_e164: phone_e164,
+      text: reply,
+    });
 
-    // 2) enviar reply pelo Evolution (isto é o que te falta agora)
-    const send = await sendTextViaEvolution(instance, phone_e164, reply);
-
-    return json({
+    return NextResponse.json({
       ok: true,
       handled: true,
       client_id,
       phone_e164,
-      reply_preview: reply.slice(0, 180),
-      evolution_send_ok: send.ok,
-      evolution_status: send.status,
-      evolution_raw_preview: send.raw,
+      reply_preview: reply.slice(0, 220),
+      evolution_send_ok: evo.ok,
+      evolution_status: evo.status,
+      evolution_raw_preview: safeStr(evo.raw).slice(0, 220),
     });
-  } catch (e: any) {
-    return json({ ok: false, error: e?.message || "internal_error" }, 500);
+  } catch (err: any) {
+    return NextResponse.json(
+      { ok: false, error: err?.message || 'internal_error' },
+      { status: 500 }
+    );
   }
 }
