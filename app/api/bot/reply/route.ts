@@ -1,8 +1,8 @@
+// app/api/bot/reply/route.ts
 import { NextResponse } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
 import { getSystemBasePrompt, mergePrompts } from '@/lib/promptBase';
 import { maybeToolAnswer } from '@/lib/tools/router';
-import { shouldSearchWeb, searxngSearch, buildSourcesContext } from '@/lib/web/search';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -19,7 +19,7 @@ function isValidApiKey(req: Request) {
 }
 
 // ✅ Trial: válido até trial_end
-// ✅ Active: válido; se tiver trial_end/subscription_expires_at, respeita; se não tiver, assume pago (não expira aqui)
+// ✅ Active: válido; se tiver trial_end, respeita; se não tiver, assume pago (não expira aqui)
 // ❌ Expired: bloqueia
 function isServiceActive(client: any) {
   if (!client) return false;
@@ -29,7 +29,6 @@ function isServiceActive(client: any) {
 
   const now = Date.now();
 
-  // trial_end (trial) - obrigatório
   if (status === 'trial') {
     if (!client.trial_end) return false;
     const end = new Date(client.trial_end);
@@ -37,22 +36,13 @@ function isServiceActive(client: any) {
     return end.getTime() > now;
   }
 
-  // active
   if (status === 'active') {
-    // se tiver subscription_expires_at, respeita
-    if (client.subscription_expires_at) {
-      const exp = new Date(client.subscription_expires_at);
-      if (!isNaN(exp.getTime())) return exp.getTime() > now;
-    }
-    // se tiver trial_end também respeita (alguns setups usam trial_end mesmo em active)
-    if (client.trial_end) {
-      const end = new Date(client.trial_end);
-      if (!isNaN(end.getTime())) return end.getTime() > now;
-    }
-    return true;
+    if (!client.trial_end) return true;
+    const end = new Date(client.trial_end);
+    if (isNaN(end.getTime())) return true;
+    return end.getTime() > now;
   }
 
-  // outros estados: por segurança, bloqueia
   return false;
 }
 
@@ -83,46 +73,113 @@ function stripJsonFromReply(text: string) {
   return text.trim();
 }
 
-function parseAllowHosts(csv: string): string[] {
-  return safeStr(csv)
+function shouldSearchWeb(text: string) {
+  const t = safeStr(text).toLowerCase();
+  if (!t) return false;
+
+  // evita pesquisar para conversa trivial
+  const smallTalk = ['olá', 'ola', 'bom dia', 'boa tarde', 'boa noite', 'obrigado', 'obrigada', 'ok', 'teste', 'test'];
+  if (smallTalk.includes(t)) return false;
+
+  // sinais fortes de factualidade/atualidade
+  const triggers = [
+    'quando', 'qual', 'quem', 'onde', 'horário', 'horario', 'feriado',
+    'preço', 'preco', 'telefone', 'morada', 'site', 'link', 'regulamento',
+    'data', 'requisitos', 'documentos', 'taxa', 'valor',
+  ];
+  if (t.includes('?')) return true;
+  return triggers.some((k) => t.includes(k));
+}
+
+function getBaseUrlFromRequest(req: Request) {
+  // Vercel / proxies
+  const proto = req.headers.get('x-forwarded-proto') || 'https';
+  const host =
+    req.headers.get('x-forwarded-host') ||
+    req.headers.get('host') ||
+    process.env.VERCEL_URL ||
+    '';
+  if (!host) return '';
+  const h = host.startsWith('http') ? host : `${proto}://${host}`;
+  return h.replace(/\/$/, '');
+}
+
+function parseAllowHosts(client: any): string[] {
+  // Preferência:
+  // 1) web_policy { enabled, hosts[] }
+  // 2) web_allow_hosts "a.com, b.pt"
+  // 3) vazio
+  try {
+    const wp = client?.web_policy;
+    if (wp && typeof wp === 'object' && wp.enabled === true) {
+      const hosts = Array.isArray(wp.hosts) ? wp.hosts : [];
+      return hosts.map((x: any) => safeStr(x)).filter(Boolean);
+    }
+  } catch {}
+  const raw = safeStr(client?.web_allow_hosts || '');
+  if (!raw) return [];
+  return raw
     .split(',')
-    .map((s) => safeStr(s).toLowerCase().replace(/^https?:\/\//, '').replace(/\/.*$/, ''))
+    .map((x) => safeStr(x).replace(/^https?:\/\//, '').replace(/\/.*$/, ''))
     .filter(Boolean);
 }
 
-function getAllowDomainsFromClient(client: any): string[] {
-  // 1) clients.web_allow_hosts (CSV)
-  const fromCsv = parseAllowHosts(client?.web_allow_hosts || '');
-  if (fromCsv.length) return fromCsv;
+type SearchResult = { title?: string; url?: string; snippet?: string; source?: string };
 
-  // 2) clients.web_policy (jsonb) -> { enabled, mode, hosts, max_results }
-  const wp = client?.web_policy;
-  if (wp && typeof wp === 'object' && wp.enabled) {
-    const hosts = Array.isArray(wp.hosts) ? wp.hosts : [];
-    return hosts
-      .map((h: any) => safeStr(h).toLowerCase().replace(/^https?:\/\//, '').replace(/\/.*$/, ''))
-      .filter(Boolean);
-  }
-
-  return [];
-}
-
-function filterResultsByAllowDomains(results: any[], allowDomains: string[]): any[] {
+function filterResultsByAllowlist(results: SearchResult[], allowDomains: string[]) {
   if (!Array.isArray(results)) return [];
   if (!allowDomains || allowDomains.length === 0) return results;
 
-  return results.filter((r: any) => {
-    const url = safeStr(r?.url);
-    if (!url) return false;
-    try {
-      const u = new URL(url);
-      const host = u.hostname.replace(/^www\./, '').toLowerCase();
-      return allowDomains.some((d) => host === d || host.endsWith(`.${d}`));
-    } catch {
-      // se a URL não for válida, corta
-      return false;
-    }
+  const allow = allowDomains
+    .map((d) => d.toLowerCase().trim())
+    .filter(Boolean);
+
+  return results.filter((r) => {
+    const u = safeStr(r?.url).toLowerCase();
+    if (!u) return false;
+    return allow.some((d) => u.includes(`://${d}`) || u.includes(`.${d}/`) || u.includes(`//${d}/`));
   });
+}
+
+function buildSourcesContext(results: SearchResult[]) {
+  if (!Array.isArray(results) || results.length === 0) return '';
+
+  const lines: string[] = [];
+  for (let i = 0; i < results.length; i++) {
+    const r = results[i];
+    const url = safeStr(r?.url);
+    if (!url) continue;
+    const title = safeStr(r?.title) || url;
+    const snippet = safeStr(r?.snippet);
+    lines.push(`### Fonte ${i + 1}`);
+    lines.push(`Título: ${title}`);
+    lines.push(`URL: ${url}`);
+    if (snippet) lines.push(`Excerto: ${snippet}`);
+    lines.push('');
+  }
+  return lines.join('\n').trim();
+}
+
+async function toolsSearch(req: Request, query: string, n: number, domains: string[]) {
+  const baseUrl = getBaseUrlFromRequest(req);
+  if (!baseUrl) return { ok: false, results: [] as SearchResult[] };
+
+  const url = new URL(`${baseUrl}/api/tools/search`);
+  url.searchParams.set('q', query);
+  url.searchParams.set('n', String(Math.max(1, Math.min(10, n || 5))));
+  if (domains && domains.length > 0) url.searchParams.set('domains', domains.join(','));
+
+  // Chamada interna ao teu endpoint Vercel (que por sua vez fala com o Whoogle/proxy)
+  const res = await fetch(url.toString(), {
+    method: 'GET',
+    headers: { 'accept': 'application/json' },
+    cache: 'no-store',
+  });
+
+  if (!res.ok) return { ok: false, results: [] as SearchResult[] };
+  const data: any = await res.json().catch(() => null);
+  const results = Array.isArray(data?.results) ? (data.results as SearchResult[]) : [];
+  return { ok: true, results };
 }
 
 export async function POST(req: Request) {
@@ -153,7 +210,7 @@ export async function POST(req: Request) {
     // 🔎 Buscar cliente (precisamos de instance_name p/ histórico)
     const { data: client, error: cErr } = await supabase
       .from('clients')
-      .select('id, status, trial_end, subscription_expires_at, bot_instructions, company_name, instance_name, web_allow_hosts, web_policy')
+      .select('id, status, trial_end, bot_instructions, company_name, instance_name, web_allow_hosts, web_policy')
       .eq('id', client_id)
       .single();
     if (cErr) throw cErr;
@@ -166,16 +223,15 @@ export async function POST(req: Request) {
           error: 'Serviço expirado',
           reason: 'subscription-expired',
           status: client?.status,
-          trial_end: client?.trial_end,
-          subscription_expires_at: client?.subscription_expires_at,
+          trial_end: client?.trial_end
         },
         { status: 403 }
       );
     }
 
-    const instance = safeStr(client.instance_name);
+    const instance = safeStr(client.instance_name) || 'TrataTudo bot';
 
-    // ✅ 1) Guardar inbound já (sempre) + client_id
+    // ✅ 1) Guardar inbound já (sempre)
     await supabase.from('wa_messages').insert([{
       client_id,
       phone_e164,
@@ -214,7 +270,7 @@ export async function POST(req: Request) {
     }
 
     const groqKey = process.env.GROQ_API_KEY || '';
-    const model = process.env.GROQ_MODEL || 'llama-3.1-8b-instant';
+    const model = process.env.GROQ_MODEL || 'llama-3.3-70b-versatile';
     if (!groqKey) {
       return NextResponse.json({ ok: false, error: 'GROQ_API_KEY em falta' }, { status: 500 });
     }
@@ -225,6 +281,7 @@ export async function POST(req: Request) {
       const { data: hist, error: hErr } = await supabase
         .from('wa_messages')
         .select('direction, text, created_at')
+        .eq('client_id', client_id)
         .eq('phone_e164', phone_e164)
         .eq('instance', instance)
         .order('created_at', { ascending: false })
@@ -242,31 +299,31 @@ export async function POST(req: Request) {
       }
     }
 
-    // ✅ 4) SEARCH LAYER (B): searxngSearch + allowlist por cliente (sem função externa)
+    // ✅ 4) SEARCH LAYER (B): usa /api/tools/search (Vercel) + allowlist
     let systemWithContext = finalPrompt;
 
     if (shouldSearchWeb(text)) {
-      const allowDomains = getAllowDomainsFromClient(client);
-
-      // searxngSearch no teu projeto deve devolver array de {title,url,snippet,...}
-      const rawResults = await searxngSearch(text, 8);
-
-      const filtered = filterResultsByAllowDomains(rawResults, allowDomains).slice(0, 5);
+      const allowDomains = parseAllowHosts(client);
+      const search = await toolsSearch(req, text, 6, allowDomains);
+      const filtered = filterResultsByAllowlist(search.results, allowDomains).slice(0, 3);
       const ctx = buildSourcesContext(filtered);
 
       if (ctx) {
         const allowText =
           allowDomains.length > 0
-            ? `- Só podes usar links destes domínios: ${allowDomains.join(', ')}.\n`
-            : `- Não existe allowlist: usa apenas fontes oficiais/autoridade.\n`;
+            ? `- Só podes usar fontes destes domínios: ${allowDomains.join(', ')}.\n`
+            : `- Sem allowlist: usa apenas fontes oficiais/autoridade.\n`;
 
+        // ✅ MAIS FORTE: se há fontes, NÃO PODES responder sem as usar.
         systemWithContext =
           `${finalPrompt}\n\n` +
           `## Instruções de pesquisa (OBRIGATÓRIO)\n` +
-          `- Tens FONTES no contexto. Usa-as para responder.\n` +
+          `- Tens FONTES no contexto. Tens de as usar.\n` +
           allowText +
-          `- No fim, inclui "Fontes:" com 1–3 links.\n` +
-          `- Se as fontes forem insuficientes, diz que não consegues confirmar.\n\n` +
+          `- Responde com factos suportados nas fontes.\n` +
+          `- Se as fontes não tiverem a resposta, diz claramente que não consegues confirmar.\n` +
+          `- No fim, inclui "Fontes:" com 1–3 URLs EXATAS (as do contexto).\n\n` +
+          `## Fontes (contexto)\n` +
           `${ctx}`;
       } else {
         systemWithContext =
@@ -278,7 +335,7 @@ export async function POST(req: Request) {
     }
 
     // 🚀 5) Chamar Groq com contexto + histórico
-    const messages: any[] = [
+    const messages = [
       { role: 'system', content: systemWithContext },
       ...historyMsgs,
       ...(push_name ? [{ role: 'system', content: `Nome do utilizador (WhatsApp): ${push_name}` }] : []),
@@ -353,7 +410,7 @@ export async function POST(req: Request) {
       }
     }
 
-    // 💾 7) Guardar outbound final + client_id
+    // 💾 7) Guardar outbound final
     await supabase.from('wa_messages').insert([{
       client_id,
       phone_e164,
