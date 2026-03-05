@@ -1,6 +1,5 @@
 // lib/web/search.ts
-// Pesquisa web via Whoogle Proxy (VPS) com allowlist por cliente.
-// IMPORTANTE: buildSourcesContext NÃO exige snippet (porque Whoogle às vezes devolve snippet vazio).
+// Pesquisa web via Proxy (VPS) + ENRIQUECIMENTO de snippet (fetch ao URL quando snippet vem vazio)
 
 type WebSource = { title?: string; url?: string; snippet?: string; source?: string };
 
@@ -31,7 +30,6 @@ function hostFromUrl(url: string) {
 }
 
 function stripDiacritics(s: string) {
-  // remove acentos (Valença -> Valenca)
   try {
     return s.normalize("NFD").replace(/[\u0300-\u036f]/g, "");
   } catch {
@@ -91,7 +89,7 @@ export function shouldSearchWeb(text: string) {
   return triggers.some((k) => t.includes(k));
 }
 
-// ---------- internal fetch ----------
+// ---------- internal: fetch proxy search ----------
 async function fetchProxy(query: string, n: number, domains?: string[]) {
   const q = safeStr(query);
   if (!q) return [];
@@ -108,7 +106,6 @@ async function fetchProxy(query: string, n: number, domains?: string[]) {
     : [];
 
   if (domList.length > 0) {
-    // proxy aceita `domains=a,b,c`
     params.set("domains", domList.join(","));
   }
 
@@ -154,7 +151,82 @@ async function fetchProxy(query: string, n: number, domains?: string[]) {
   }
 }
 
-// ---------- 2) search (com retries/normalização/domains) ----------
+// ---------- internal: extract text from html ----------
+function decodeHtmlEntities(s: string) {
+  // sem libs: suficiente para meta descriptions típicas
+  return s
+    .replace(/&nbsp;/g, " ")
+    .replace(/&amp;/g, "&")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">");
+}
+
+function stripTags(html: string) {
+  // remove scripts/styles e tags
+  const noScripts = html
+    .replace(/<script[\s\S]*?<\/script>/gi, " ")
+    .replace(/<style[\s\S]*?<\/style>/gi, " ");
+  const text = noScripts.replace(/<[^>]+>/g, " ");
+  return decodeHtmlEntities(text)
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function pickMetaDescription(html: string) {
+  const m =
+    html.match(/<meta[^>]+name=["']description["'][^>]*content=["']([^"']+)["'][^>]*>/i) ||
+    html.match(/<meta[^>]+content=["']([^"']+)["'][^>]*name=["']description["'][^>]*>/i);
+  return m ? safeStr(m[1]) : "";
+}
+
+async function fetchPageSnippet(pageUrl: string) {
+  const url = safeStr(pageUrl);
+  if (!url) return "";
+
+  const ctrl = new AbortController();
+  const timeout = setTimeout(() => ctrl.abort(), 7000);
+
+  try {
+    const res = await fetch(url, {
+      method: "GET",
+      signal: ctrl.signal,
+      cache: "no-store",
+      headers: {
+        // alguns sites respondem melhor com UA
+        "User-Agent":
+          "Mozilla/5.0 (compatible; TrataTudoBot/1.0; +https://trata-tudo-dashbord.vercel.app)",
+        Accept: "text/html,application/xhtml+xml",
+      },
+    });
+
+    if (!res.ok) return "";
+
+    const html = await res.text();
+    const meta = pickMetaDescription(html);
+    if (meta && meta.length >= 40) {
+      return meta.slice(0, 320);
+    }
+
+    const text = stripTags(html);
+    if (!text) return "";
+
+    // tenta apanhar a zona com "Feriado Municipal" e data
+    // (sem assumir formato: só dá ao LLM um excerto útil)
+    const idx = text.toLowerCase().indexOf("feriado municipal");
+    const start = Math.max(0, idx === -1 ? 0 : idx - 120);
+    const snippet = text.slice(start, start + 520);
+
+    return snippet.trim();
+  } catch {
+    return "";
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+// ---------- 2) search (retries + enrich snippet) ----------
 export async function searxngSearch(
   query: string,
   n = 8,
@@ -163,11 +235,6 @@ export async function searxngSearch(
   const q0 = safeStr(query);
   if (!q0) return [];
 
-  // Tentativas:
-  // 1) query original + domains
-  // 2) query sem acentos + domains
-  // 3) query original sem domains (fallback)
-  // 4) query sem acentos sem domains (fallback)
   const q1 = stripDiacritics(q0);
 
   const tries: Array<{ q: string; d?: string[] }> = [
@@ -177,12 +244,36 @@ export async function searxngSearch(
     { q: q1, d: undefined },
   ];
 
+  let results: WebSource[] = [];
   for (const t of tries) {
     const res = await fetchProxy(t.q, n, t.d);
-    if (Array.isArray(res) && res.length > 0) return res;
+    if (Array.isArray(res) && res.length > 0) {
+      results = res;
+      break;
+    }
   }
 
-  return [];
+  if (!results || results.length === 0) return [];
+
+  // Enriquecer snippet: só para 1-2 resultados e apenas quando snippet vem vazio
+  const enriched: WebSource[] = [];
+  for (let i = 0; i < results.length; i++) {
+    const r = results[i];
+    const snippet = safeStr(r?.snippet);
+    if (snippet) {
+      enriched.push(r);
+      continue;
+    }
+
+    if (i <= 1) {
+      const pageSnippet = await fetchPageSnippet(safeStr(r.url));
+      enriched.push({ ...r, snippet: pageSnippet || "" });
+    } else {
+      enriched.push(r);
+    }
+  }
+
+  return enriched;
 }
 
 // ---------- 3) allowlist filter ----------
@@ -214,7 +305,7 @@ export function buildSourcesContext(results: WebSource[]) {
       const url = safeStr(r.url);
       const title = safeStr(r.title) || url;
       const snippet = safeStr(r.snippet);
-      return `- ${title}\n URL: ${url}${snippet ? `\n Resumo: ${snippet}` : ""}`;
+      return `- ${title}\nURL: ${url}${snippet ? `\nExcerto: ${snippet}` : ""}`;
     });
 
   if (lines.length === 0) return "";
