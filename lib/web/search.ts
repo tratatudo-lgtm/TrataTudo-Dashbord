@@ -1,4 +1,3 @@
-// lib/web/search.ts
 export type WebSource = {
   title: string;
   url: string;
@@ -6,200 +5,161 @@ export type WebSource = {
 };
 
 function safeStr(v: any) {
-  if (v === null || v === undefined) return "";
+  if (v === null || v === undefined) return '';
   return String(v).trim();
 }
 
-function withTimeout(ms: number) {
-  const controller = new AbortController();
-  const t = setTimeout(() => controller.abort(), ms);
-  return { controller, clear: () => clearTimeout(t) };
-}
-
-/** Normaliza lista CSV "a.com, b.pt" -> ["a.com","b.pt"] */
-function parseAllowlist(csv?: string | null): string[] {
-  const raw = safeStr(csv);
-  if (!raw) return [];
-  return raw
-    .split(",")
-    .map((s) => s.trim().toLowerCase())
-    .filter(Boolean);
-}
-
-function hostOf(urlStr: string): string {
-  try {
-    const u = new URL(urlStr);
-    return (u.hostname || "").toLowerCase();
-  } catch {
-    return "";
-  }
+function normalizeHost(h: string) {
+  return safeStr(h)
+    .toLowerCase()
+    .replace(/^https?:\/\//, '')
+    .replace(/^www\./, '')
+    .replace(/\/.*$/, '');
 }
 
 /**
- * Mantém apenas fontes cujo hostname esteja na allowlist.
- * Regras:
- * - "cm-valenca.pt" aceita "cm-valenca.pt" e subdomínios (ex: www.cm-valenca.pt)
- * - se allowlist estiver vazia, devolve as fontes como estão
+ * Decide quando vale a pena pesquisar.
+ * Mantém simples e previsível: perguntas factuais/atuais, datas, cargos, horários, feriados, contactos, etc.
  */
-export function filterSourcesByAllowlist(
-  sources: WebSource[],
-  allowlistCsv?: string | null
-): WebSource[] {
-  if (!Array.isArray(sources) || sources.length === 0) return [];
-  const allow = parseAllowlist(allowlistCsv);
-  if (allow.length === 0) return sources;
-
-  return sources.filter((s) => {
-    const h = hostOf(s.url);
-    if (!h) return false;
-    return allow.some((d) => h === d || h.endsWith("." + d));
-  });
-}
-
-// Heurística simples para disparar pesquisa só quando faz sentido
 export function shouldSearchWeb(text: string) {
   const t = safeStr(text).toLowerCase();
-  if (!t) return false;
 
-  const keywords = [
-    "presidente",
-    "câmara",
-    "camara",
-    "municipal",
-    "feriado",
-    "feriados",
-    "data",
-    "quando é",
-    "quando e",
-    "horário",
-    "horarios",
-    "aberto",
-    "fecha",
-    "telefone",
-    "contacto",
-    "contato",
-    "morada",
-    "endereço",
-    "endereco",
-    "site oficial",
-    "regulamento",
-    "lei",
-    "decreto",
-    "taxa",
-    "preço",
-    "preco",
-    "quanto custa",
-    "agora",
-    "atual",
-    "atualmente",
+  // perguntas curtas e factuais (quem/quando/onde/qual)
+  const isQuestion =
+    t.includes('?') ||
+    t.startsWith('quem ') ||
+    t.startsWith('quando ') ||
+    t.startsWith('onde ') ||
+    t.startsWith('qual ') ||
+    t.startsWith('quais ') ||
+    t.startsWith('o que ') ||
+    t.startsWith('que ') ||
+    t.startsWith('como ');
+
+  if (!isQuestion) return false;
+
+  // palavras que normalmente precisam de fonte/atualização
+  const triggers = [
+    'presidente',
+    'câmara',
+    'camara',
+    'feriado',
+    'horário',
+    'horario',
+    'contacto',
+    'telefone',
+    'email',
+    'morada',
+    'site',
+    'website',
+    'taxa',
+    'preço',
+    'preco',
+    'documentos',
+    'requisitos',
+    'regulamento',
   ];
 
-  const hasKeyword = keywords.some((k) => t.includes(k));
-  if (hasKeyword) return true;
-
-  const looksLikeQuestion =
-    t.includes("?") ||
-    t.startsWith("quem ") ||
-    t.startsWith("qual ") ||
-    t.startsWith("quais ") ||
-    t.startsWith("quando ") ||
-    t.startsWith("onde ") ||
-    t.startsWith("como ");
-
-  const hasLocal =
-    t.includes("valença") ||
-    t.includes("valenca") ||
-    t.includes("cristelo") ||
-    t.includes("covo") ||
-    t.includes("arão") ||
-    t.includes("arao");
-
-  return looksLikeQuestion && hasLocal;
+  return triggers.some((k) => t.includes(k));
 }
 
 /**
- * Mantemos o nome "searxngSearch" para não mudares o route.ts.
- * Por baixo, isto chama o teu Whoogle Proxy:
- *   GET {WEB_PROXY_URL}/search?q=...&n=...&domains=a.com,b.pt
- *   Header: X-TrataTudo-Key: WEB_PROXY_KEY
+ * Pesquisa via whoogle-proxy (VPS).
+ * Requer:
+ *  - WHOOGLE_PROXY_URL (ex: http://79.72.48.151:8888)
+ *  - WHOOGLE_PROXY_KEY (vai no header X-TrataTudo-Key)
+ *
+ * O teu endpoint é: /search?q=...&n=...&domains=...
  */
-export async function searxngSearch(
-  query: string,
-  n = 5,
-  opts?: { domains?: string | null }
-): Promise<WebSource[]> {
-  const base = process.env.WEB_PROXY_URL;
-  const key = process.env.WEB_PROXY_KEY;
+export async function searxngSearch(query: string, n = 5, domains?: string[] | string) {
+  const base = safeStr(process.env.WHOOGLE_PROXY_URL);
+  const key = safeStr(process.env.WHOOGLE_PROXY_KEY);
 
-  if (!base || !key) return [];
+  if (!base) {
+    // sem proxy configurado -> devolve vazio
+    return [] as WebSource[];
+  }
 
   const q = safeStr(query);
-  if (!q) return [];
+  if (!q) return [] as WebSource[];
 
-  const url = new URL("/search", base);
-  url.searchParams.set("q", q);
-  url.searchParams.set("n", String(Math.max(1, Math.min(10, n))));
+  let domainsParam = '';
+  if (Array.isArray(domains) && domains.length) {
+    domainsParam = domains.map(normalizeHost).filter(Boolean).join(',');
+  } else if (typeof domains === 'string' && domains.trim()) {
+    domainsParam = domains
+      .split(',')
+      .map(normalizeHost)
+      .filter(Boolean)
+      .join(',');
+  }
 
-  // allowlist de domínios: prioridade opts.domains -> ENV default
-  const envDomains = process.env.WEB_PROXY_DOMAINS_DEFAULT || "";
-  const domains = safeStr(opts?.domains) || safeStr(envDomains);
-  if (domains) url.searchParams.set("domains", domains);
+  const url =
+    `${base.replace(/\/$/, '')}/search` +
+    `?q=${encodeURIComponent(q)}` +
+    `&n=${encodeURIComponent(String(n))}` +
+    (domainsParam ? `&domains=${encodeURIComponent(domainsParam)}` : '');
 
-  const { controller, clear } = withTimeout(12000);
+  // timeout simples para não ficar preso
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 12_000);
 
   try {
-    const res = await fetch(url.toString(), {
-      method: "GET",
+    const res = await fetch(url, {
+      method: 'GET',
       headers: {
-        "X-TrataTudo-Key": key,
-        "User-Agent": "TrataTudoBot/1.0",
-        Accept: "application/json",
+        ...(key ? { 'X-TrataTudo-Key': key } : {}),
       },
       signal: controller.signal,
+      cache: 'no-store',
     });
 
-    if (!res.ok) return [];
+    const raw = await res.text();
+    let json: any = null;
+    try {
+      json = JSON.parse(raw);
+    } catch {
+      json = null;
+    }
 
-    const data = await res.json().catch(() => null);
-    if (!data?.ok || !Array.isArray(data.results)) return [];
+    if (!res.ok || !json || json.ok !== true || !Array.isArray(json.results)) {
+      return [] as WebSource[];
+    }
 
-    const out: WebSource[] = data.results
+    // Normaliza resultados
+    const results: WebSource[] = json.results
       .map((r: any) => ({
-        title: safeStr(r?.title),
+        title: safeStr(r?.title || r?.url),
         url: safeStr(r?.url),
-        snippet: safeStr(r?.snippet || r?.description || ""),
+        snippet: safeStr(r?.snippet),
       }))
-      .filter((r: WebSource) => r.title && r.url)
-      .slice(0, n);
+      .filter((r: WebSource) => r.url.length > 0);
 
-    return out;
+    return results;
   } catch {
-    return [];
+    return [] as WebSource[];
   } finally {
-    clear();
+    clearTimeout(timeout);
   }
 }
 
+/**
+ * Constrói contexto legível para o LLM com fontes.
+ */
 export function buildSourcesContext(results: WebSource[]) {
-  if (!Array.isArray(results) || results.length === 0) return "";
+  if (!Array.isArray(results) || results.length === 0) return '';
 
   const lines: string[] = [];
-  lines.push("## FONTES WEB (Whoogle Proxy)");
-  results.slice(0, 5).forEach((r, i) => {
-    const idx = i + 1;
-    const title = safeStr(r.title);
-    const url = safeStr(r.url);
-    const snip = safeStr(r.snippet);
-    lines.push(`${idx}) ${title}\n${url}${snip ? `\n${snip}` : ""}`);
+  lines.push('## FONTES (pesquisa web)');
+  results.forEach((r, idx) => {
+    const n = idx + 1;
+    const title = safeStr(r.title) || safeStr(r.url);
+    const snippet = safeStr(r.snippet);
+    lines.push(`${n}) ${title}`);
+    lines.push(`URL: ${r.url}`);
+    if (snippet) lines.push(`Resumo: ${snippet}`);
+    lines.push('');
   });
 
-  // Este bloco é só contexto para o LLM (não é para o utilizador)
-  lines.push(
-    "\n## Regras de uso das fontes (OBRIGATÓRIO)\n" +
-      "- Responde com base nas fontes.\n" +
-      "- Se as fontes forem contraditórias ou fracas, diz que não consegues confirmar a 100%.\n" +
-      "- No fim, inclui 'Fontes:' com 1–3 links (os mais relevantes)."
-  );
-
-  return lines.join("\n\n");
+  return lines.join('\n').trim();
 }
