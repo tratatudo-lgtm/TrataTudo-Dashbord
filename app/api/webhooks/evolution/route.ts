@@ -1,182 +1,209 @@
-import { NextResponse } from "next/server";
-import { createClient as createSbAdmin } from "@supabase/supabase-js";
+// app/api/webhooks/evolution/route.ts
+import { NextResponse } from 'next/server';
+import { createClient } from '@/lib/supabase/server';
 
-function getSupabaseAdmin() {
-  const url = process.env.NEXT_PUBLIC_SUPABASE_URL!;
-  const key = process.env.SUPABASE_SERVICE_ROLE_KEY!;
-  if (!url || !key) throw new Error("Missing Supabase env vars");
-  return createSbAdmin(url, key, { auth: { persistSession: false } });
+export const runtime = 'nodejs';
+export const dynamic = 'force-dynamic';
+
+function safeStr(v: any) {
+  if (v === null || v === undefined) return '';
+  return String(v).trim();
 }
 
-function cleanText(s: any) {
-  return String(s || "").replace(/\s+/g, " ").trim();
+function normalizeE164FromRemoteJid(remoteJid: string) {
+  // Ex: "351937230116@s.whatsapp.net" -> "+351937230116"
+  const num = safeStr(remoteJid).split('@')[0].replace(/[^\d+]/g, '');
+  if (!num) return '';
+  return num.startsWith('+') ? num : `+${num}`;
 }
 
-function jidToNumber(jid: string) {
-  // "3519xxxxxxx@s.whatsapp.net" -> "3519xxxxxxx"
-  if (!jid) return "";
-  const m = jid.match(/^(\d+)@/);
-  return m ? m[1] : jid.replace(/\D/g, "");
+function extractTextFromEvolutionPayload(payload: any): string {
+  const msg = payload?.data?.message || payload?.message || {};
+  // Baileys / Evolution podem mandar em vários formatos
+  return (
+    safeStr(msg?.conversation) ||
+    safeStr(msg?.extendedTextMessage?.text) ||
+    safeStr(msg?.text) ||
+    safeStr(payload?.data?.message?.extendedTextMessage?.text) ||
+    ''
+  );
 }
 
-function normalizeNumberDigits(n: string) {
-  // Evolution aceita com ou sem +, mas mais seguro mandar só dígitos
-  return String(n || "").replace(/\D/g, "");
+async function resolveClientIdByHubOverrideOrClient(
+  supabase: any,
+  instance_name: string,
+  phone_e164: string
+): Promise<number | null> {
+  // 1) override por número (o que tu queres: DEMO pode usar prompt do cliente 6)
+  const { data: ov } = await supabase
+    .from('hub_phone_overrides')
+    .select('effective_client_id')
+    .eq('instance_name', instance_name)
+    .eq('phone_e164', phone_e164)
+    .eq('enabled', true)
+    .maybeSingle();
+
+  if (ov?.effective_client_id) return Number(ov.effective_client_id);
+
+  // 2) fallback: tentar achar cliente normal pelo phone + instance
+  const { data: c } = await supabase
+    .from('clients')
+    .select('id')
+    .eq('instance_name', instance_name)
+    .eq('phone_e164', phone_e164)
+    .maybeSingle();
+
+  if (c?.id) return Number(c.id);
+
+  return null;
 }
 
-function pickFirstString(...vals: any[]) {
-  for (const v of vals) {
-    if (typeof v === "string" && v.trim()) return v.trim();
+async function sendTextViaEvolution(instance: string, toE164: string, text: string) {
+  const evoUrl = safeStr(process.env.EVOLUTION_API_URL);
+  const evoKey = safeStr(process.env.EVOLUTION_API_KEY);
+
+  if (!evoUrl || !evoKey) {
+    return { ok: false, error: 'missing_evolution_env' as const };
   }
-  return "";
+
+  const url = `${evoUrl.replace(/\/+$/, '')}/message/sendText/${encodeURIComponent(instance)}`;
+
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      apikey: evoKey,
+    },
+    body: JSON.stringify({
+      number: toE164.replace(/^\+/, ''), // Evolution geralmente quer sem "+"
+      text,
+    }),
+  });
+
+  const raw = await res.text();
+  if (!res.ok) {
+    return { ok: false, error: 'evolution_send_failed' as const, status: res.status, raw };
+  }
+  return { ok: true, raw };
 }
 
-/**
- * Webhook handler (Evolution API)
- * - identifica instance_name
- * - identifica phone_e164 (remetente)
- * - identifica texto recebido
- * - resolve client_id pela instância ativa (public.client_instances)
- * - chama /api/bot/reply (motor com estado)
- * - envia reply via Evolution /message/sendText/{instance}
- */
 export async function POST(req: Request) {
+  // ⚠️ Regra de ouro: este endpoint NÃO pode devolver 500.
+  // Mesmo com erro, devolve 200 e um JSON com reason, para o Evolution não entrar em fallback.
   try {
-    const supabase = getSupabaseAdmin();
+    const url = new URL(req.url);
 
-    const payload = await req.json().catch(() => ({}));
+    const secret = safeStr(url.searchParams.get('s'));
+    const expected = safeStr(process.env.TRATATUDO_RELAY_SECRET);
 
-    // ⚠️ Evolution envia formatos diferentes conforme connector/evento.
-    // Vamos tentar apanhar instance de vários sítios:
-    const instanceName = pickFirstString(
-      payload?.instance,
-      payload?.instanceName,
-      payload?.data?.instance,
-      payload?.data?.instanceName,
-      payload?.body?.instance,
-      payload?.body?.instanceName,
-      payload?.qrcode?.instance
-    );
-
-    // Texto da mensagem (vários formatos possíveis)
-    const text = cleanText(
-      pickFirstString(
-        payload?.data?.message?.conversation,
-        payload?.data?.message?.extendedTextMessage?.text,
-        payload?.data?.message?.text,
-        payload?.message?.conversation,
-        payload?.message?.extendedTextMessage?.text,
-        payload?.text,
-        payload?.data?.text
-      )
-    );
-
-    // Remetente (JID ou número)
-    const remoteJid = pickFirstString(
-      payload?.data?.key?.remoteJid,
-      payload?.key?.remoteJid,
-      payload?.data?.remoteJid,
-      payload?.remoteJid,
-      payload?.data?.from,
-      payload?.from
-    );
-
-    const fromNumber = normalizeNumberDigits(
-      pickFirstString(
-        payload?.data?.number,
-        payload?.number,
-        payload?.data?.sender,
-        payload?.sender,
-        jidToNumber(remoteJid)
-      )
-    );
-
-    // ignorar eventos sem mensagem de texto
-    if (!instanceName || !fromNumber || !text) {
-      return NextResponse.json({ ok: true, ignored: true });
+    if (!expected || secret !== expected) {
+      return NextResponse.json({ ok: true, ignored: true, reason: 'bad_secret' }, { status: 200 });
     }
 
-    // 1) resolver client_id pela instância ativa
-    const { data: ci, error: ciErr } = await supabase
-      .from("client_instances")
-      .select("client_id, instance_name, status")
-      .eq("instance_name", instanceName)
-      .eq("status", "active")
-      .maybeSingle();
-
-    if (ciErr) throw ciErr;
-    if (!ci?.client_id) {
-      // se não encontrou cliente para a instância, não envia nada
-      return NextResponse.json({ ok: true, ignored: true, reason: "unknown_instance" });
+    const payload = await req.json().catch(() => null);
+    if (!payload) {
+      return NextResponse.json({ ok: true, ignored: true, reason: 'invalid_json' }, { status: 200 });
     }
 
-    const client_id = Number(ci.client_id);
+    const event = safeStr(payload.event);
+    const instance_name = safeStr(payload.instance);
 
-    // 2) chamar o motor do bot (estado + flows)
-    const origin = new URL(req.url).origin;
-    const botRes = await fetch(`${origin}/api/bot/reply`, {
-      method: "POST",
+    // Só processamos mensagens recebidas
+    if (event !== 'messages.upsert') {
+      return NextResponse.json({ ok: true, ignored: true, reason: 'not_messages_upsert' }, { status: 200 });
+    }
+
+    const fromMe = !!payload?.data?.key?.fromMe;
+    const remoteJid = safeStr(payload?.data?.key?.remoteJid);
+    const phone_e164 = normalizeE164FromRemoteJid(remoteJid);
+    const push_name = safeStr(payload?.data?.pushName);
+
+    if (fromMe) {
+      return NextResponse.json({ ok: true, ignored: true, reason: 'from_me' }, { status: 200 });
+    }
+    if (!instance_name || !phone_e164) {
+      return NextResponse.json(
+        { ok: true, ignored: true, reason: 'missing_instance_or_phone', instance_name, remoteJid },
+        { status: 200 }
+      );
+    }
+
+    const text = extractTextFromEvolutionPayload(payload);
+    if (!text) {
+      return NextResponse.json({ ok: true, ignored: true, reason: 'no_text' }, { status: 200 });
+    }
+
+    const supabase = createClient();
+
+    // Resolve qual client_id deve ser usado (override por número -> o que tu queres)
+    const client_id = await resolveClientIdByHubOverrideOrClient(supabase, instance_name, phone_e164);
+
+    if (!client_id) {
+      // Não encontramos client associado a este número na instância
+      // Não crasha, apenas ignora.
+      return NextResponse.json(
+        { ok: true, ignored: true, reason: 'client_not_found', instance_name, phone_e164 },
+        { status: 200 }
+      );
+    }
+
+    // Chamar o bot (internamente via HTTP)
+    const base =
+      safeStr(process.env.NEXT_PUBLIC_SITE_URL) ||
+      `https://${safeStr(req.headers.get('host'))}`;
+
+    const apiKey = safeStr(process.env.TRATATUDO_API_KEY);
+    if (!apiKey) {
+      return NextResponse.json(
+        { ok: true, handled: false, reason: 'missing_TRATATUDO_API_KEY_env' },
+        { status: 200 }
+      );
+    }
+
+    const botRes = await fetch(`${base.replace(/\/+$/, '')}/api/bot/reply`, {
+      method: 'POST',
       headers: {
-        "Content-Type": "application/json",
-        // o bot/reply está protegido por ADMIN_API_KEY (X-TrataTudo-Key)
-        "X-TrataTudo-Key": process.env.ADMIN_API_KEY || "",
+        'content-type': 'application/json',
+        'x-tratatudo-key': apiKey,
       },
       body: JSON.stringify({
         client_id,
-        phone_e164: `+${fromNumber}`, // guardamos com +
+        phone_e164,
+        push_name,
         text,
-        channel: "whatsapp",
-        instance_name: instanceName,
       }),
     });
 
-    const botJson = await botRes.json().catch(() => ({}));
-    const reply = cleanText(botJson?.reply);
+    const botJson = await botRes.json().catch(() => null);
 
+    const reply = safeStr(botJson?.data?.reply);
     if (!reply) {
-      return NextResponse.json({ ok: true, ignored: true, reason: "no_reply" });
+      return NextResponse.json(
+        { ok: true, handled: false, reason: 'bot_no_reply', client_id, phone_e164 },
+        { status: 200 }
+      );
     }
 
-    // 3) enviar reply via Evolution
-    const evoBase = (process.env.EVOLUTION_API_URL || "").replace(/\/+$/, "");
-    const evoKey = process.env.EVOLUTION_API_KEY || "";
+    // Enviar resposta via Evolution
+    const send = await sendTextViaEvolution(instance_name, phone_e164, reply);
 
-    if (!evoBase || !evoKey) {
-      // sem config de Evolution no Vercel, não dá para enviar
-      return NextResponse.json({ ok: false, error: "Missing EVOLUTION_API_URL/EVOLUTION_API_KEY" }, { status: 500 });
-    }
-
-    // endpoint padrão Evolution v2: POST /message/sendText/{instance}
-    const sendUrl = `${evoBase}/message/sendText/${encodeURIComponent(instanceName)}`;
-
-    const sendRes = await fetch(sendUrl, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        // header usado na doc: apikey
-        apikey: evoKey,
-      } as any,
-      body: JSON.stringify({
-        number: fromNumber,
-        text: reply,
-      }),
-    });
-
-    // não bloqueia a UX se o Evolution falhar, mas devolve info
-    const sendOk = sendRes.ok;
-    const sendBody = await sendRes.text().catch(() => "");
-
-    return NextResponse.json({
-      ok: true,
-      client_id,
-      instance: instanceName,
-      from: fromNumber,
-      sent: sendOk,
-      evolution_status: sendRes.status,
-      evolution_body: sendBody ? sendBody.slice(0, 500) : "",
-    });
-  } catch (e: any) {
-    console.error("EVOLUTION WEBHOOK ERROR:", e);
-    return NextResponse.json({ ok: false, error: e.message }, { status: 500 });
+    // Nunca 500: sempre 200
+    return NextResponse.json(
+      {
+        ok: true,
+        handled: true,
+        client_id,
+        phone_e164,
+        instance_name,
+        send,
+      },
+      { status: 200 }
+    );
+  } catch (err: any) {
+    // NUNCA devolver 500 ao Evolution
+    return NextResponse.json(
+      { ok: true, handled: false, reason: 'exception', message: safeStr(err?.message) },
+      { status: 200 }
+    );
   }
 }
