@@ -2,7 +2,7 @@ import { NextResponse } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
 import { getSystemBasePrompt, mergePrompts } from '@/lib/promptBase';
 import { maybeToolAnswer } from '@/lib/tools/router';
-import { shouldSearchWeb, searxngSearch, buildSourcesContext } from '@/lib/web/search';
+import { shouldSearchWeb, searxngSearch, buildSourcesContext, type WebPolicy } from '@/lib/web/search';
 
 function safeStr(v: any) {
   if (v === null || v === undefined) return '';
@@ -68,6 +68,16 @@ function stripJsonFromReply(text: string) {
   return text.trim();
 }
 
+function normalizeWebPolicy(raw: any): WebPolicy {
+  const p = (raw && typeof raw === 'object') ? raw : {};
+  const enabled = !!p.enabled;
+  const mode = (p.mode === 'open' || p.mode === 'allowlist') ? p.mode : 'allowlist';
+  const hosts = Array.isArray(p.hosts) ? p.hosts.map((x: any) => safeStr(x)).filter(Boolean) : [];
+  const max_results = p.max_results ? Number(p.max_results) : undefined;
+
+  return { enabled, mode, hosts, max_results };
+}
+
 export async function POST(req: Request) {
   try {
     const supabase = createClient();
@@ -95,7 +105,7 @@ export async function POST(req: Request) {
     // 🔎 Buscar cliente (precisamos de instance_name p/ histórico)
     const { data: client, error: cErr } = await supabase
       .from('clients')
-      .select('id, status, trial_end, bot_instructions, company_name, instance_name')
+      .select('id, status, trial_end, bot_instructions, company_name, instance_name, web_policy')
       .eq('id', client_id)
       .single();
     if (cErr) throw cErr;
@@ -115,6 +125,7 @@ export async function POST(req: Request) {
     }
 
     const instance = safeStr(client.instance_name);
+    const webPolicy = normalizeWebPolicy((client as any)?.web_policy);
 
     // ✅ 1) Guardar inbound já (sempre)
     await supabase.from('wa_messages').insert([{
@@ -181,13 +192,18 @@ export async function POST(req: Request) {
       }
     }
 
-    // ✅ 4) SEARCH LAYER (B): SearXNG quando fizer sentido
+    // ✅ 4) SEARCH LAYER (B): Whoogle Proxy quando fizer sentido + permitido por policy
     let systemWithContext = finalPrompt;
 
-    if (shouldSearchWeb(text)) {
-      const results = await searxngSearch(text, 5);
+    const wantsWeb = shouldSearchWeb(text);
+    const webEnabled = !!webPolicy.enabled;
+
+    if (wantsWeb && webEnabled) {
+      const n = webPolicy.max_results ? Number(webPolicy.max_results) : 5;
+      const results = await searxngSearch(text, n, webPolicy);
       const ctx = buildSourcesContext(results);
 
+      // Se mode=allowlist e não devolveu nada, diz ao modelo que não há fontes oficiais suficientes
       if (ctx) {
         systemWithContext =
           `${finalPrompt}\n\n` +
@@ -196,6 +212,13 @@ export async function POST(req: Request) {
           `- No fim, inclui "Fontes:" com 1–3 links.\n` +
           `- Se as fontes forem insuficientes, diz que não consegues confirmar.\n\n` +
           `${ctx}`;
+      } else {
+        // Ajuda o modelo a não inventar
+        systemWithContext =
+          `${finalPrompt}\n\n` +
+          `## Nota (Pesquisa Web)\n` +
+          `A pesquisa web estava ativa, mas não foram encontradas fontes permitidas/fiáveis para este cliente.\n` +
+          `Não inventes. Se precisares de confirmação externa, pede ao utilizador um link oficial ou diz que não consegues confirmar.\n`;
       }
     }
 
@@ -203,7 +226,6 @@ export async function POST(req: Request) {
     const messages = [
       { role: 'system', content: systemWithContext },
       ...historyMsgs,
-      // contexto do nome, sem forçar saudações
       ...(push_name ? [{ role: 'system', content: `Nome do utilizador (WhatsApp): ${push_name}` }] : []),
       { role: 'user', content: text },
     ];
@@ -283,7 +305,7 @@ export async function POST(req: Request) {
       instance,
       direction: 'out',
       text: reply || 'Ok 👍',
-      raw: { model, source: 'groq', push_name: push_name || undefined },
+      raw: { model, source: 'groq', push_name: push_name || undefined, web: { enabled: webEnabled, mode: webPolicy.mode, hosts: webPolicy.hosts } },
     }]);
 
     return NextResponse.json({
