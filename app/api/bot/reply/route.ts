@@ -2,12 +2,7 @@ import { NextResponse } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
 import { getSystemBasePrompt, mergePrompts } from '@/lib/promptBase';
 import { maybeToolAnswer } from '@/lib/tools/router';
-import {
-  shouldSearchWeb,
-  searxngSearch,
-  buildSourcesContext,
-  filterSourcesByAllowlist,
-} from '@/lib/web/search';
+import { shouldSearchWeb, searxngSearch, buildSourcesContext } from '@/lib/web/search';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -23,33 +18,32 @@ function isValidApiKey(req: Request) {
   return expected.length > 0 && key === expected;
 }
 
-// ✅ Trial: válido até trial_end
-// ✅ Active: válido; se tiver trial_end, respeita; se não tiver, assume pago (não expira aqui)
-// ❌ Expired: bloqueia
+// Trial / Active / Expired
 function isServiceActive(client: any) {
   if (!client) return false;
 
   const status = String(client.status || '').toLowerCase();
   if (status === 'expired') return false;
 
+  const now = Date.now();
+
   if (status === 'trial') {
     if (!client.trial_end) return false;
-    const end = new Date(client.trial_end);
-    if (isNaN(end.getTime())) return false;
-    return end.getTime() > Date.now();
+    const end = new Date(client.trial_end).getTime();
+    if (Number.isNaN(end)) return false;
+    return end > now;
   }
 
   if (status === 'active') {
     if (!client.trial_end) return true;
-    const end = new Date(client.trial_end);
-    if (isNaN(end.getTime())) return true;
-    return end.getTime() > Date.now();
+    const end = new Date(client.trial_end).getTime();
+    if (Number.isNaN(end)) return true;
+    return end > now;
   }
 
   return false;
 }
 
-// tenta extrair JSON __REPORT__ sem rebentar
 function extractJsonReport(text: string) {
   try {
     const start = text.indexOf('{');
@@ -65,7 +59,6 @@ function extractJsonReport(text: string) {
 }
 
 function stripJsonFromReply(text: string) {
-  // remove bloco JSON, se existir, para nunca aparecer ao utilizador
   const start = text.indexOf('{');
   const end = text.lastIndexOf('}');
   if (start !== -1 && end !== -1 && end > start) {
@@ -91,11 +84,28 @@ async function getClientAllowlistDomains(supabase: any, client_id: number): Prom
   }
 }
 
+function filterSourcesByAllowlistLocal(rawResults: any[], allowDomains: string[]) {
+  if (!Array.isArray(rawResults)) return [];
+  if (!allowDomains || allowDomains.length === 0) return rawResults;
+
+  const allow = allowDomains.map((d) => d.toLowerCase().replace(/^https?:\/\//, '').replace(/\/$/, ''));
+  return rawResults.filter((r: any) => {
+    const url = safeStr(r?.url);
+    try {
+      const u = new URL(url);
+      const host = u.hostname.toLowerCase();
+      return allow.some((d) => host === d || host.endsWith(`.${d}`));
+    } catch {
+      return false;
+    }
+  });
+}
+
 export async function POST(req: Request) {
   try {
     const supabase = createClient();
 
-    // Auth: API key (server-to-server) OU sessão (dashboard)
+    // Auth: API key (server-to-server) OU sessão (dashboard/webhook)
     const apiKeyOk = isValidApiKey(req);
     const { data: { session } } = await supabase.auth.getSession();
     if (!apiKeyOk && !session) {
@@ -116,7 +126,6 @@ export async function POST(req: Request) {
       );
     }
 
-    // 🔎 Buscar cliente (precisamos de instance_name p/ histórico)
     const { data: client, error: cErr } = await supabase
       .from('clients')
       .select('id, status, trial_end, bot_instructions, company_name, instance_name')
@@ -124,7 +133,6 @@ export async function POST(req: Request) {
       .single();
     if (cErr) throw cErr;
 
-    // 🚫 BLOQUEIO POR STATUS + DATA
     if (!isServiceActive(client)) {
       return NextResponse.json(
         {
@@ -140,7 +148,7 @@ export async function POST(req: Request) {
 
     const instance = safeStr(client.instance_name);
 
-    // ✅ 1) Guardar inbound já (sempre)
+    // guardar inbound
     await supabase.from('wa_messages').insert([{
       phone_e164,
       instance,
@@ -149,7 +157,7 @@ export async function POST(req: Request) {
       raw: { source: 'api/bot/reply', client_id, push_name: push_name || undefined },
     }]);
 
-    // ✅ 2) TOOL LAYER (A): hora/data (determinístico)
+    // Tool layer
     const tool = maybeToolAnswer(text, 'pt-PT');
     if (tool?.reply) {
       await supabase.from('wa_messages').insert([{
@@ -166,7 +174,7 @@ export async function POST(req: Request) {
       });
     }
 
-    // 🔹 Prompt final = base + cliente
+    // Prompt
     const base = await getSystemBasePrompt();
     const finalPrompt = mergePrompts(base, client?.bot_instructions || '');
     if (!finalPrompt) {
@@ -182,7 +190,7 @@ export async function POST(req: Request) {
       return NextResponse.json({ ok: false, error: 'GROQ_API_KEY em falta' }, { status: 500 });
     }
 
-    // ✅ 3) HISTÓRICO: últimas 12 mensagens desta pessoa nesta instância
+    // Histórico (mesma instância)
     let historyMsgs: any[] = [];
     if (instance) {
       const { data: hist, error: hErr } = await supabase
@@ -205,19 +213,13 @@ export async function POST(req: Request) {
       }
     }
 
-    // ✅ 4) SEARCH LAYER (B): Whoogle Proxy + allowlist por cliente
+    // Search layer (com allowlist por cliente)
     let systemWithContext = finalPrompt;
 
     if (shouldSearchWeb(text)) {
-      // 4.1) ler allowlist do cliente (domínios permitidos)
       const allowDomains = await getClientAllowlistDomains(supabase, Number(client.id));
-      const allowCsv = allowDomains.join(',');
-
-      // 4.2) buscar resultados (já com domains= no proxy)
-      const rawResults = await searxngSearch(text, 8, { domains: allowCsv || null });
-
-      // 4.3) filtrar por allowlist (defesa extra no backend)
-      const results = filterSourcesByAllowlist(rawResults, allowCsv || null).slice(0, 5);
+      const rawResults = await searxngSearch(text, 8);
+      const results = filterSourcesByAllowlistLocal(rawResults, allowDomains).slice(0, 5);
 
       const ctx = buildSourcesContext(results);
 
@@ -225,7 +227,7 @@ export async function POST(req: Request) {
         const allowText =
           allowDomains.length > 0
             ? `- Só podes usar links destes domínios: ${allowDomains.join(', ')}.\n`
-            : `- Se não existir allowlist, usa apenas fontes oficiais/autoridade (site institucional, governo, etc.).\n`;
+            : `- Se não existir allowlist, usa apenas fontes oficiais/autoridade.\n`;
 
         systemWithContext =
           `${finalPrompt}\n\n` +
@@ -236,7 +238,6 @@ export async function POST(req: Request) {
           `- Se as fontes forem insuficientes, diz que não consegues confirmar.\n\n` +
           `${ctx}`;
       } else {
-        // se não há fontes (ou foram filtradas todas), obriga transparência
         systemWithContext =
           `${finalPrompt}\n\n` +
           `## Instruções (OBRIGATÓRIO)\n` +
@@ -245,7 +246,6 @@ export async function POST(req: Request) {
       }
     }
 
-    // 🚀 5) Chamar Groq com contexto + histórico
     const messages = [
       { role: 'system', content: systemWithContext },
       ...historyMsgs,
@@ -271,21 +271,19 @@ export async function POST(req: Request) {
     try { data = JSON.parse(raw); } catch { data = null; }
 
     if (!res.ok || !data) {
+      const fallback = 'Desculpa — tive um problema a responder agora. Tenta outra vez daqui a pouco 🙏';
+
       await supabase.from('wa_messages').insert([{
         phone_e164,
         instance,
         direction: 'out',
-        text: 'Desculpa — tive um problema a responder agora. Tenta outra vez daqui a pouco 🙏',
+        text: fallback,
         raw: { source: 'groq_error', http_status: res.status, push_name: push_name || undefined },
       }]);
 
       return NextResponse.json({
         ok: true,
-        data: {
-          client_id,
-          phone_e164,
-          reply: 'Desculpa — tive um problema a responder agora. Tenta outra vez daqui a pouco 🙏'
-        }
+        data: { client_id, phone_e164, reply: fallback }
       });
     }
 
@@ -293,7 +291,7 @@ export async function POST(req: Request) {
     const report = extractJsonReport(reply);
     reply = stripJsonFromReply(reply);
 
-    // ✅ 6) Se vier __REPORT__, cria ticket e responde só com texto + tracking_code
+    // Ticket se vier __REPORT__
     if (report) {
       const { data: tRows, error: tErr } = await supabase
         .from('tickets')
@@ -316,13 +314,12 @@ export async function POST(req: Request) {
         .limit(1);
 
       if (!tErr && tRows?.[0]?.tracking_code) {
-        reply = `Feito ✅ Registei o teu pedido com o código **${tRows[0].tracking_code}**. Podes perguntar a qualquer momento: “estado ${tRows[0].tracking_code}”.`;
+        reply = `Feito ✅ Registei o teu pedido com o código **${tRows[0].tracking_code}**. Podes perguntar: “estado ${tRows[0].tracking_code}”.`;
       } else {
         reply = reply || 'Feito ✅ Registei o teu pedido.';
       }
     }
 
-    // 💾 7) Guardar outbound final
     await supabase.from('wa_messages').insert([{
       phone_e164,
       instance,
@@ -336,7 +333,6 @@ export async function POST(req: Request) {
       data: { client_id, phone_e164, reply: reply || 'Ok 👍' }
     });
   } catch (err: any) {
-    console.error('BOT REPLY error:', err);
     return NextResponse.json({ ok: false, error: err?.message || 'Erro interno' }, { status: 500 });
   }
 }
