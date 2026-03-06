@@ -1,109 +1,90 @@
-import { NextResponse } from 'next/server'
-import { createClient } from '@/lib/supabase/server'
+// app/api/admin/web-allowlist/route.ts
+import { NextResponse } from 'next/server';
+import { createClient } from '@/lib/supabase/server';
+import { validateAdmin } from '@/lib/auth-admin';
 
-export const runtime = 'nodejs'
-export const dynamic = 'force-dynamic'
+export const runtime = 'nodejs';
+export const dynamic = 'force-dynamic';
 
-function safe(v: any) {
-  if (v === null || v === undefined) return ''
-  return String(v).trim()
+function safeStr(v: any) {
+  if (v === null || v === undefined) return '';
+  return String(v).trim();
 }
 
-function isValidApiKey(req: Request) {
-  const key = req.headers.get('x-tratatudo-key') || ''
-  const expected = process.env.TRATATUDO_API_KEY || ''
-  return expected.length > 0 && key === expected
+function normalizeHost(input: string) {
+  let s = safeStr(input).toLowerCase();
+
+  // remove protocolo
+  s = s.replace(/^https?:\/\//, '');
+
+  // corta path/query
+  s = s.split('/')[0].split('?')[0].split('#')[0];
+
+  // remove portas
+  s = s.replace(/:\d+$/, '');
+
+  // remove www.
+  s = s.replace(/^www\./, '');
+
+  // valida básico
+  if (!s) return '';
+  if (!/^[a-z0-9.-]+\.[a-z]{2,}$/.test(s)) return '';
+
+  return s;
 }
 
-// GET ?client_id=6  -> lista domínios
-export async function GET(req: Request) {
-  try {
-    const supabase = createClient()
-
-    // dashboard: sessão OU server-to-server: api key
-    const apiKeyOk = isValidApiKey(req)
-    const { data: { session } } = await supabase.auth.getSession()
-    if (!apiKeyOk && !session) {
-      return NextResponse.json({ ok: false, error: 'unauthorized' }, { status: 401 })
-    }
-
-    const url = new URL(req.url)
-    const client_id = Number(url.searchParams.get('client_id') || 0)
-    if (!client_id) {
-      return NextResponse.json({ ok: false, error: 'client_id required' }, { status: 400 })
-    }
-
-    const { data, error } = await supabase
-      .from('client_web_allowlist')
-      .select('id, client_id, domain, enabled, created_at')
-      .eq('client_id', client_id)
-      .order('domain', { ascending: true })
-
-    if (error) throw error
-
-    return NextResponse.json({ ok: true, data: data || [] })
-  } catch (err: any) {
-    return NextResponse.json({ ok: false, error: err?.message || 'internal error' }, { status: 500 })
-  }
-}
-
-/**
- * POST body:
- * { client_id: 6, domains: ["cm-valenca.pt","..."], mode: "replace" | "add" }
- * - replace: limpa e mete só os novos
- * - add: adiciona sem apagar
- */
 export async function POST(req: Request) {
+  const adminCheck = await validateAdmin();
+  if (!adminCheck?.isAdmin) {
+    return NextResponse.json({ ok: false, error: adminCheck?.error || 'Não autorizado' }, { status: adminCheck?.status || 401 });
+  }
+
   try {
-    const supabase = createClient()
+    const supabase = createClient();
+    const body = await req.json();
 
-    const apiKeyOk = isValidApiKey(req)
-    const { data: { session } } = await supabase.auth.getSession()
-    if (!apiKeyOk && !session) {
-      return NextResponse.json({ ok: false, error: 'unauthorized' }, { status: 401 })
+    const client_id = Number(body.client_id);
+    const enabled = Boolean(body.enabled);
+
+    let hosts: string[] = Array.isArray(body.hosts) ? body.hosts : [];
+    // permitir também CSV vindo da UI
+    if (!hosts.length && typeof body.hosts_csv === 'string') {
+      hosts = body.hosts_csv.split(',').map((x: string) => x.trim());
     }
-
-    const body = await req.json()
-
-    const client_id = Number(body.client_id || 0)
-    const mode = safe(body.mode || 'replace').toLowerCase()
-    const domainsRaw = Array.isArray(body.domains) ? body.domains : []
-    const domains = domainsRaw.map(safe).filter(Boolean)
 
     if (!client_id) {
-      return NextResponse.json({ ok: false, error: 'client_id required' }, { status: 400 })
+      return NextResponse.json({ ok: false, error: 'client_id é obrigatório' }, { status: 400 });
     }
 
-    if (!['replace', 'add'].includes(mode)) {
-      return NextResponse.json({ ok: false, error: 'mode must be replace|add' }, { status: 400 })
-    }
+    const normalized = Array.from(
+      new Set(hosts.map(normalizeHost).filter(Boolean))
+    );
 
-    if (mode === 'replace') {
-      const { error: delErr } = await supabase
-        .from('client_web_allowlist')
-        .delete()
-        .eq('client_id', client_id)
-      if (delErr) throw delErr
-    }
+    const web_allow_hosts = enabled && normalized.length ? normalized.join(', ') : null;
 
-    if (domains.length > 0) {
-      const rows = domains.map((d) => ({ client_id, domain: d, enabled: true }))
-      const { error: upErr } = await supabase
-        .from('client_web_allowlist')
-        .upsert(rows, { onConflict: 'client_id,domain' })
-      if (upErr) throw upErr
-    }
+    const web_policy = {
+      mode: 'allowlist',
+      enabled: Boolean(enabled),
+      hosts: enabled ? normalized : [],
+      max_results: 5,
+    };
 
-    const { data, error } = await supabase
-      .from('client_web_allowlist')
-      .select('id, client_id, domain, enabled, created_at')
-      .eq('client_id', client_id)
-      .order('domain', { ascending: true })
+    const { error } = await supabase
+      .from('clients')
+      .update({
+        web_allow_hosts,
+        web_policy,
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', client_id);
 
-    if (error) throw error
+    if (error) throw error;
 
-    return NextResponse.json({ ok: true, data: data || [] })
-  } catch (err: any) {
-    return NextResponse.json({ ok: false, error: err?.message || 'internal error' }, { status: 500 })
+    return NextResponse.json({
+      ok: true,
+      data: { client_id, enabled: web_policy.enabled, hosts: normalized, web_allow_hosts },
+    });
+  } catch (e: any) {
+    return NextResponse.json({ ok: false, error: e?.message || 'Erro interno' }, { status: 500 });
   }
 }
