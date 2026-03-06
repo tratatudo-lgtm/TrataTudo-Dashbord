@@ -1,149 +1,80 @@
-// lib/evolution.ts
-export type EvoResult<T = any> = {
-  ok: boolean;
-  status: number;
-  data?: T;
-  error?: string;
-  raw?: any;
-};
+const EVO_URL = process.env.EVOLUTION_API_URL!;
+const EVO_KEY = process.env.EVOLUTION_API_KEY!;
 
-function getEnv(name: string) {
-  return (process.env[name] || '').trim();
-}
+async function evo(path: string, options: RequestInit = {}) {
+  const res = await fetch(`${EVO_URL}${path}`, {
+    ...options,
+    headers: {
+      "Content-Type": "application/json",
+      apikey: EVO_KEY,
+      ...(options.headers || {}),
+    },
+  });
 
-function getBaseUrl() {
-  // Ex: http://79.72.48.151:8080
-  return getEnv('EVOLUTION_SERVER_URL') || getEnv('EVO_URL') || getEnv('SERVER_URL');
-}
-
-function getApiKey() {
-  return getEnv('EVOLUTION_API_KEY') || getEnv('EVO_KEY') || getEnv('AUTHENTICATION_API_KEY');
-}
-
-async function evoFetch<T>(
-  path: string,
-  init?: RequestInit
-): Promise<EvoResult<T>> {
-  const base = getBaseUrl();
-  const key = getApiKey();
-
-  if (!base || !key) {
-    return {
-      ok: false,
-      status: 0,
-      error: 'missing_EVOLUTION_SERVER_URL_or_EVOLUTION_API_KEY',
-      raw: { basePresent: !!base, keyPresent: !!key },
-    };
-  }
-
-  const url = `${base.replace(/\/+$/, '')}${path.startsWith('/') ? '' : '/'}${path}`;
+  const text = await res.text();
 
   try {
-    const res = await fetch(url, {
-      ...init,
-      headers: {
-        ...(init?.headers || {}),
-        apikey: key, // Evolution API usa header "apikey"
-        'Content-Type': 'application/json',
-      },
-      cache: 'no-store',
-    });
-
-    const text = await res.text();
-    let json: any = null;
-    try {
-      json = text ? JSON.parse(text) : null;
-    } catch {
-      json = null;
-    }
-
-    if (!res.ok) {
-      return {
-        ok: false,
-        status: res.status,
-        error: (json?.message || json?.error || text || `HTTP ${res.status}`)?.toString(),
-        raw: json || text,
-      };
-    }
-
-    return {
-      ok: true,
-      status: res.status,
-      data: (json ?? (text as any)) as T,
-      raw: json || text,
-    };
-  } catch (e: any) {
-    return {
-      ok: false,
-      status: 0,
-      error: e?.message || 'fetch_failed',
-      raw: String(e),
-    };
+    return JSON.parse(text);
+  } catch {
+    return text;
   }
 }
 
-/**
- * Cria instância (Baileys) no Evolution.
- * Nota: endpoints variam por versão. Estes paths funcionam na maioria dos setups "Evolution API".
- * Se o teu Evolution usa paths diferentes, diz-me o teu Swagger/Docs e eu ajusto.
- */
-export async function createEvolutionInstance(instanceName: string): Promise<EvoResult<any>> {
-  const name = String(instanceName || '').trim();
-  if (!name) return { ok: false, status: 400, error: 'instance_name_required' };
-
-  // Tentativa 1 (muito comum):
-  // POST /instance/create  { instanceName: "client-6", token?: "" }
-  let r = await evoFetch<any>('/instance/create', {
-    method: 'POST',
-    body: JSON.stringify({ instanceName: name }),
+export async function createEvolutionInstance(name: string) {
+  return evo("/instance/create", {
+    method: "POST",
+    body: JSON.stringify({
+      instanceName: name,
+      integration: "WHATSAPP-BAILEYS",
+    }),
   });
-
-  // Tentativa 2 (algumas versões):
-  if (!r.ok) {
-    r = await evoFetch<any>('/instances/create', {
-      method: 'POST',
-      body: JSON.stringify({ name }),
-    });
-  }
-
-  // Tentativa 3 (variação):
-  if (!r.ok) {
-    r = await evoFetch<any>(`/instance/create/${encodeURIComponent(name)}`, {
-      method: 'POST',
-      body: JSON.stringify({}),
-    });
-  }
-
-  return r;
 }
 
-/**
- * Elimina instância no Evolution.
- */
-export async function deleteEvolutionInstance(instanceName: string): Promise<EvoResult<any>> {
-  const name = String(instanceName || '').trim();
-  if (!name) return { ok: false, status: 400, error: 'instance_name_required' };
-
-  // Tentativa 1:
-  // DELETE /instance/delete/:name
-  let r = await evoFetch<any>(`/instance/delete/${encodeURIComponent(name)}`, {
-    method: 'DELETE',
+export async function deleteEvolutionInstance(name: string) {
+  return evo(`/instance/delete/${name}`, {
+    method: "DELETE",
   });
+}
 
-  // Tentativa 2:
-  if (!r.ok) {
-    r = await evoFetch<any>(`/instances/${encodeURIComponent(name)}`, {
-      method: 'DELETE',
-    });
-  }
+export async function fetchEvolutionInstances() {
+  return evo("/instance/fetchInstances");
+}
 
-  // Tentativa 3:
-  if (!r.ok) {
-    r = await evoFetch<any>('/instance/delete', {
-      method: 'DELETE',
-      body: JSON.stringify({ instanceName: name }),
-    });
-  }
+export async function getEvolutionInstanceStatus(name: string) {
+  return evo(`/instance/connectionState/${name}`);
+}
 
-  return r;
+export async function getEvolutionInstanceQR(name: string) {
+  return evo(`/instance/connect/${name}`);
+}
+
+export async function getEvolutionPairingCode(name: string) {
+  return evo(`/instance/pairingCode/${name}`);
+}
+
+export async function setEvolutionInstanceWebhook(
+  name: string,
+  webhookUrl: string
+) {
+  return evo(`/webhook/set/${name}`, {
+    method: "POST",
+    body: JSON.stringify({
+      webhook: webhookUrl,
+      events: ["messages.upsert"],
+    }),
+  });
+}
+
+export async function sendEvolutionText(
+  instanceName: string,
+  number: string,
+  text: string
+) {
+  return evo(`/message/sendText/${instanceName}`, {
+    method: "POST",
+    body: JSON.stringify({
+      number,
+      text,
+    }),
+  });
 }
