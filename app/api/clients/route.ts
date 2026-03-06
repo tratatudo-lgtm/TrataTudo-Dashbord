@@ -1,24 +1,25 @@
-import { createClient } from '@/lib/supabase/server';
 import { NextResponse } from 'next/server';
+import { createClient } from '@/lib/supabase/server';
 
-const DEFAULT_INSTANCE_NAME = 'TrataTudo bot';
+export const runtime = 'nodejs';
+export const dynamic = 'force-dynamic';
+
+const HUB_INSTANCE_NAME = 'TrataTudo bot';
+
+function safeStr(v: any) {
+  if (v === null || v === undefined) return '';
+  return String(v).trim();
+}
 
 export async function GET(request: Request) {
   try {
-    const { searchParams } = new URL(request.url);
-    const status = searchParams.get('status');
-    const query = searchParams.get('q');
-
     const supabase = createClient();
-    const {
-      data: { session },
-    } = await supabase.auth.getSession();
+    const { searchParams } = new URL(request.url);
 
-    if (!session) {
-      return NextResponse.json({ ok: false, error: 'Não autorizado' }, { status: 401 });
-    }
+    const status = safeStr(searchParams.get('status'));
+    const q = safeStr(searchParams.get('q'));
 
-    let dbQuery = supabase
+    let query = supabase
       .from('clients')
       .select(`
         id,
@@ -29,30 +30,55 @@ export async function GET(request: Request) {
         status,
         instance_name,
         production_instance_name,
+        created_at,
+        updated_at,
         client_instances (
+          id,
+          client_id,
           instance_name,
           is_hub,
           status,
           created_at
         )
-      `);
+      `)
+      .order('id', { ascending: false });
 
     if (status && status !== 'all') {
-      dbQuery = dbQuery.eq('status', status);
+      query = query.eq('status', status);
     }
 
-    if (query) {
-      dbQuery = dbQuery.or(`company_name.ilike.%${query}%,phone_e164.ilike.%${query}%`);
+    if (q) {
+      query = query.or(`company_name.ilike.%${q}%,phone_e164.ilike.%${q}%`);
     }
 
-    const { data, error } = await dbQuery.order('id', { ascending: false });
-    if (error) throw error;
+    const { data, error } = await query;
+
+    if (error) {
+      return NextResponse.json(
+        { ok: false, error: error.message },
+        { status: 500 }
+      );
+    }
 
     const normalized = (data || []).map((client: any) => {
-      const activeInstance =
-        client.client_instances?.find((ci: any) => ci.status === 'active') ||
-        client.client_instances?.[0] ||
-        null;
+      const clientInstances = Array.isArray(client.client_instances)
+        ? client.client_instances
+        : [];
+
+      const activeDedicated =
+        clientInstances.find(
+          (ci: any) => ci?.is_hub === false && ci?.status === 'active'
+        ) || null;
+
+      const activeHub =
+        clientInstances.find(
+          (ci: any) =>
+            ci?.instance_name === HUB_INSTANCE_NAME &&
+            ci?.is_hub === true &&
+            ci?.status === 'active'
+        ) || null;
+
+      const currentInstance = activeDedicated || activeHub || clientInstances[0] || null;
 
       return {
         id: client.id,
@@ -61,40 +87,47 @@ export async function GET(request: Request) {
         bot_instructions: client.bot_instructions,
         trial_end: client.trial_end,
         status: client.status,
+        created_at: client.created_at,
+        updated_at: client.updated_at,
         instance_name:
-          activeInstance?.instance_name ||
+          currentInstance?.instance_name ||
           client.production_instance_name ||
           client.instance_name ||
           null,
-        is_hub: activeInstance?.is_hub ?? null,
-        instance_status: activeInstance?.status ?? null,
+        is_hub: currentInstance?.is_hub ?? null,
+        instance_status: currentInstance?.status ?? null,
+        production_instance_name: client.production_instance_name || null,
       };
     });
 
-    return NextResponse.json({ ok: true, data: normalized });
+    return NextResponse.json({
+      ok: true,
+      data: normalized,
+    });
   } catch (error: any) {
-    console.error('API Clients GET Error:', error);
-    return NextResponse.json({ ok: false, error: error.message }, { status: 500 });
+    return NextResponse.json(
+      { ok: false, error: error?.message || 'Erro interno' },
+      { status: 500 }
+    );
   }
 }
 
 export async function POST(request: Request) {
   try {
     const supabase = createClient();
-    const {
-      data: { session },
-    } = await supabase.auth.getSession();
-
-    if (!session) {
-      return NextResponse.json({ ok: false, error: 'Não autorizado' }, { status: 401 });
-    }
-
     const body = await request.json();
-    const { company_name, phone_e164, bot_instructions } = body;
+
+    const company_name = safeStr(body?.company_name);
+    const phone_e164 = safeStr(body?.phone_e164);
+    const bot_instructions =
+      safeStr(body?.bot_instructions) || 'Olá! Como posso ajudar?';
 
     if (!company_name || !phone_e164) {
       return NextResponse.json(
-        { ok: false, error: 'Nome da empresa e telefone são obrigatórios' },
+        {
+          ok: false,
+          error: 'company_name e phone_e164 são obrigatórios',
+        },
         { status: 400 }
       );
     }
@@ -102,61 +135,141 @@ export async function POST(request: Request) {
     const trialEnd = new Date();
     trialEnd.setDate(trialEnd.getDate() + 3);
 
-    const { data: client, error: clientError } = await supabase
+    // 1) Criar cliente em trial
+    const { data: createdClient, error: clientError } = await supabase
       .from('clients')
       .insert([
         {
           company_name,
           phone_e164,
-          bot_instructions: bot_instructions || 'Olá! Como posso ajudar?',
+          bot_instructions,
           status: 'trial',
           trial_end: trialEnd.toISOString(),
-          instance_name: DEFAULT_INSTANCE_NAME,
+          instance_name: HUB_INSTANCE_NAME,
         },
       ])
-      .select('id')
+      .select('id, company_name, phone_e164, status, trial_end, instance_name')
       .single();
 
     if (clientError) {
-      if (clientError.code === '23505' || clientError.message?.includes('phone_e164')) {
-        return NextResponse.json(
-          { ok: false, error: 'Este número já está registado.' },
-          { status: 400 }
-        );
-      }
-      throw clientError;
+      const duplicatePhone =
+        clientError.code === '23505' ||
+        safeStr(clientError.message).toLowerCase().includes('phone_e164');
+
+      return NextResponse.json(
+        {
+          ok: false,
+          error: duplicatePhone
+            ? 'Este número já está registado.'
+            : clientError.message,
+          raw: {
+            code: clientError.code ?? null,
+            message: clientError.message ?? null,
+            details: (clientError as any).details ?? null,
+            hint: (clientError as any).hint ?? null,
+          },
+        },
+        { status: duplicatePhone ? 400 : 500 }
+      );
     }
 
-    const { data: existing, error: existingError } = await supabase
+    // 2) Garantir ligação ativa ao hub trial "TrataTudo bot"
+    const { data: existingLink, error: existingLinkError } = await supabase
       .from('client_instances')
-      .select('id')
-      .eq('client_id', client.id)
-      .eq('instance_name', DEFAULT_INSTANCE_NAME)
+      .select('id, client_id, instance_name, is_hub, status')
+      .eq('client_id', createdClient.id)
+      .eq('instance_name', HUB_INSTANCE_NAME)
       .maybeSingle();
 
-    if (existingError) throw existingError;
-
-    if (!existing) {
-      const { error: linkError } = await supabase.from('client_instances').insert([
+    if (existingLinkError) {
+      return NextResponse.json(
         {
-          client_id: client.id,
-          instance_name: DEFAULT_INSTANCE_NAME,
-          is_hub: true,
-          status: 'active',
+          ok: false,
+          error: 'Cliente criado, mas falhou a verificação da ligação ao hub',
+          raw: {
+            code: existingLinkError.code ?? null,
+            message: existingLinkError.message ?? null,
+            details: (existingLinkError as any).details ?? null,
+            hint: (existingLinkError as any).hint ?? null,
+          },
         },
-      ]);
-
-      if (linkError) throw linkError;
+        { status: 500 }
+      );
     }
 
-    return NextResponse.json({ ok: true, id: client.id });
-  } catch (error: any) {
-    console.error('API Clients POST Error:', error);
-    const message =
-      error.code === '23505' || error.message?.includes('phone_e164')
-        ? 'Este número já está registado.'
-        : error.message;
+    if (existingLink?.id) {
+      const { error: reactivateError } = await supabase
+        .from('client_instances')
+        .update({
+          is_hub: true,
+          status: 'active',
+        })
+        .eq('id', existingLink.id);
 
-    return NextResponse.json({ ok: false, error: message }, { status: 500 });
+      if (reactivateError) {
+        return NextResponse.json(
+          {
+            ok: false,
+            error: 'Cliente criado, mas falhou a reativação do hub trial',
+            raw: {
+              code: reactivateError.code ?? null,
+              message: reactivateError.message ?? null,
+              details: (reactivateError as any).details ?? null,
+              hint: (reactivateError as any).hint ?? null,
+            },
+          },
+          { status: 500 }
+        );
+      }
+    } else {
+      const { error: linkError } = await supabase
+        .from('client_instances')
+        .insert([
+          {
+            client_id: createdClient.id,
+            instance_name: HUB_INSTANCE_NAME,
+            is_hub: true,
+            status: 'active',
+          },
+        ]);
+
+      if (linkError) {
+        return NextResponse.json(
+          {
+            ok: false,
+            error: 'Cliente criado, mas falhou a ligação ao hub trial',
+            raw: {
+              code: linkError.code ?? null,
+              message: linkError.message ?? null,
+              details: (linkError as any).details ?? null,
+              hint: (linkError as any).hint ?? null,
+            },
+          },
+          { status: 500 }
+        );
+      }
+    }
+
+    return NextResponse.json({
+      ok: true,
+      data: {
+        id: createdClient.id,
+        company_name: createdClient.company_name,
+        phone_e164: createdClient.phone_e164,
+        status: createdClient.status,
+        trial_end: createdClient.trial_end,
+        instance_name: HUB_INSTANCE_NAME,
+        is_hub: true,
+        instance_status: 'active',
+      },
+    });
+  } catch (error: any) {
+    return NextResponse.json(
+      {
+        ok: false,
+        error: error?.message || 'Erro interno',
+      },
+      { status: 500 }
+    );
   }
 }
