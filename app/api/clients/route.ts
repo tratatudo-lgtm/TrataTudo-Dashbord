@@ -10,7 +10,9 @@ export async function GET(request: Request) {
     const query = searchParams.get('q');
 
     const supabase = createClient();
-    const { data: { session } } = await supabase.auth.getSession();
+    const {
+      data: { session },
+    } = await supabase.auth.getSession();
 
     if (!session) {
       return NextResponse.json({ ok: false, error: 'Não autorizado' }, { status: 401 });
@@ -18,7 +20,22 @@ export async function GET(request: Request) {
 
     let dbQuery = supabase
       .from('clients')
-      .select('id, company_name, phone_e164, bot_instructions, trial_end, status');
+      .select(`
+        id,
+        company_name,
+        phone_e164,
+        bot_instructions,
+        trial_end,
+        status,
+        instance_name,
+        production_instance_name,
+        client_instances (
+          instance_name,
+          is_hub,
+          status,
+          created_at
+        )
+      `);
 
     if (status && status !== 'all') {
       dbQuery = dbQuery.eq('status', status);
@@ -29,10 +46,32 @@ export async function GET(request: Request) {
     }
 
     const { data, error } = await dbQuery.order('id', { ascending: false });
-
     if (error) throw error;
 
-    return NextResponse.json({ ok: true, data: data || [] });
+    const normalized = (data || []).map((client: any) => {
+      const activeInstance =
+        client.client_instances?.find((ci: any) => ci.status === 'active') ||
+        client.client_instances?.[0] ||
+        null;
+
+      return {
+        id: client.id,
+        company_name: client.company_name,
+        phone_e164: client.phone_e164,
+        bot_instructions: client.bot_instructions,
+        trial_end: client.trial_end,
+        status: client.status,
+        instance_name:
+          activeInstance?.instance_name ||
+          client.production_instance_name ||
+          client.instance_name ||
+          null,
+        is_hub: activeInstance?.is_hub ?? null,
+        instance_status: activeInstance?.status ?? null,
+      };
+    });
+
+    return NextResponse.json({ ok: true, data: normalized });
   } catch (error: any) {
     console.error('API Clients GET Error:', error);
     return NextResponse.json({ ok: false, error: error.message }, { status: 500 });
@@ -42,7 +81,9 @@ export async function GET(request: Request) {
 export async function POST(request: Request) {
   try {
     const supabase = createClient();
-    const { data: { session } } = await supabase.auth.getSession();
+    const {
+      data: { session },
+    } = await supabase.auth.getSession();
 
     if (!session) {
       return NextResponse.json({ ok: false, error: 'Não autorizado' }, { status: 401 });
@@ -52,52 +93,58 @@ export async function POST(request: Request) {
     const { company_name, phone_e164, bot_instructions } = body;
 
     if (!company_name || !phone_e164) {
-      return NextResponse.json({ ok: false, error: 'Nome da empresa e telefone são obrigatórios' }, { status: 400 });
+      return NextResponse.json(
+        { ok: false, error: 'Nome da empresa e telefone são obrigatórios' },
+        { status: 400 }
+      );
     }
 
     const trialEnd = new Date();
     trialEnd.setDate(trialEnd.getDate() + 3);
 
-    // 1) Criar cliente
     const { data: client, error: clientError } = await supabase
       .from('clients')
-      .insert([{
-        company_name,
-        phone_e164,
-        bot_instructions: bot_instructions || 'Olá! Como posso ajudar?',
-        status: 'trial',
-        trial_end: trialEnd.toISOString()
-      }])
+      .insert([
+        {
+          company_name,
+          phone_e164,
+          bot_instructions: bot_instructions || 'Olá! Como posso ajudar?',
+          status: 'trial',
+          trial_end: trialEnd.toISOString(),
+          instance_name: DEFAULT_INSTANCE_NAME,
+        },
+      ])
       .select('id')
       .single();
 
     if (clientError) {
       if (clientError.code === '23505' || clientError.message?.includes('phone_e164')) {
-        return NextResponse.json({ ok: false, error: 'Este número já está registado.' }, { status: 400 });
+        return NextResponse.json(
+          { ok: false, error: 'Este número já está registado.' },
+          { status: 400 }
+        );
       }
       throw clientError;
     }
 
-    // 2) Garantir ligação à instância default (TrataTudo bot)
-    // Se já existir por algum motivo, não falha: primeiro verifica.
     const { data: existing, error: existingError } = await supabase
       .from('client_instances')
       .select('id')
       .eq('client_id', client.id)
-      .limit(1)
+      .eq('instance_name', DEFAULT_INSTANCE_NAME)
       .maybeSingle();
 
     if (existingError) throw existingError;
 
     if (!existing) {
-      const { error: linkError } = await supabase
-        .from('client_instances')
-        .insert([{
+      const { error: linkError } = await supabase.from('client_instances').insert([
+        {
           client_id: client.id,
           instance_name: DEFAULT_INSTANCE_NAME,
-          is_hub: false,
-          status: 'active'
-        }]);
+          is_hub: true,
+          status: 'active',
+        },
+      ]);
 
       if (linkError) throw linkError;
     }
