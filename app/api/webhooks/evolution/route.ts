@@ -1,240 +1,172 @@
+import { createAdminClient } from '@/lib/supabase/admin';
 import { NextResponse } from 'next/server';
-import { createClient } from '@/lib/supabase/server';
+import { normalizeE164 } from '@/lib/phone';
 
-export const runtime = 'nodejs';
-export const dynamic = 'force-dynamic';
-
-function safeStr(v: any) {
-  if (v === null || v === undefined) return '';
-  return String(v).trim();
-}
-
-function jidToE164(jid: string): string {
-  const raw = safeStr(jid).split('@')[0].replace(/[^\d]/g, '');
-  if (!raw) return '';
-  return raw.startsWith('00') ? `+${raw.slice(2)}` : raw.startsWith('+') ? raw : `+${raw}`;
-}
-
-function e164ToEvolutionNumber(e164: string): string {
-  return safeStr(e164).replace(/[^\d]/g, '');
-}
-
-function checkRelaySecret(req: Request): boolean {
-  const url = new URL(req.url);
-  const got = safeStr(url.searchParams.get('s'));
-  const expected = safeStr(process.env.RELAY_SECRET || process.env.WA_RELAY_SECRET);
-  if (!expected) return true;
-  return got === expected;
-}
-
-async function sendEvolutionText(instanceName: string, toE164: string, text: string) {
-  const serverUrl = safeStr(
-    process.env.EVOLUTION_SERVER_URL ||
-    process.env.EVOLUTION_API_URL ||
-    process.env.EVO_URL ||
-    process.env.SERVER_URL
-  );
-
-  const apiKey = safeStr(
-    process.env.EVOLUTION_API_KEY ||
-    process.env.EVO_KEY ||
-    process.env.AUTHENTICATION_API_KEY
-  );
-
-  if (!serverUrl || !apiKey) {
-    return {
-      ok: false,
-      status: 0,
-      raw: 'missing_EVOLUTION_SERVER_URL_or_EVOLUTION_API_KEY',
-    };
-  }
-
-  const url = `${serverUrl.replace(/\/+$/, '')}/message/sendText/${encodeURIComponent(instanceName)}`;
-
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      apikey: apiKey,
-    },
-    body: JSON.stringify({
-      number: e164ToEvolutionNumber(toE164),
-      text,
-    }),
-  });
-
-  const raw = await res.text();
-  return { ok: res.ok, status: res.status, raw: raw.slice(0, 300) };
-}
+const HUB_INSTANCE_NAME = 'TrataTudo bot';
 
 async function resolveClientIdForHubOrInstance(
   supabase: any,
   instanceName: string,
-  fromPhoneE164: string
-): Promise<number | null> {
-  // 1) Primeiro: encontrar o cliente pelo número
-  const { data: clientRows } = await supabase
-    .from('clients')
-    .select('id, phone_e164, instance_name, production_instance_name')
-    .eq('phone_e164', fromPhoneE164)
-    .limit(1);
+  senderPhone: string
+) {
+  // 1) Trial / Hub partilhado: resolver pelo número do cliente
+  if (instanceName === HUB_INSTANCE_NAME) {
+    const { data: clientByPhone, error: clientByPhoneError } = await supabase
+      .from('clients')
+      .select('id, phone_e164, status')
+      .eq('phone_e164', senderPhone)
+      .maybeSingle();
 
-  const client = clientRows?.[0];
-  if (!client?.id) return null;
+    if (clientByPhoneError) throw clientByPhoneError;
 
-  const clientId = Number(client.id);
+    if (!clientByPhone) {
+      return null;
+    }
 
-  // 2) Verificar se este cliente tem esta instância ativa em client_instances
-  const { data: activeMatch } = await supabase
+    const { data: hubLink, error: hubLinkError } = await supabase
+      .from('client_instances')
+      .select('id, client_id, instance_name, is_hub, status')
+      .eq('client_id', clientByPhone.id)
+      .eq('instance_name', HUB_INSTANCE_NAME)
+      .eq('is_hub', true)
+      .eq('status', 'active')
+      .maybeSingle();
+
+    if (hubLinkError) throw hubLinkError;
+
+    return hubLink ? clientByPhone.id : null;
+  }
+
+  // 2) Instância privada: resolver pela instância
+  const { data: instanceLink, error: instanceLinkError } = await supabase
     .from('client_instances')
-    .select('client_id, instance_name, status')
-    .eq('client_id', clientId)
+    .select('client_id, instance_name, is_hub, status')
     .eq('instance_name', instanceName)
     .eq('status', 'active')
-    .limit(1);
+    .maybeSingle();
 
-  if (activeMatch?.[0]?.client_id) {
-    return clientId;
-  }
+  if (instanceLinkError) throw instanceLinkError;
+  if (instanceLink?.client_id) return instanceLink.client_id;
 
-  // 3) Fallback: comparar com os campos do cliente
-  //    útil se client_instances ainda não estiver sincronizado
-  const clientInstance = safeStr(client.instance_name);
-  const productionInstance = safeStr(client.production_instance_name);
+  // 3) Fallback legado
+  const { data: clientLegacy, error: clientLegacyError } = await supabase
+    .from('clients')
+    .select('id')
+    .or(`instance_name.eq.${instanceName},production_instance_name.eq.${instanceName}`)
+    .maybeSingle();
 
-  if (clientInstance === instanceName || productionInstance === instanceName) {
-    return clientId;
-  }
+  if (clientLegacyError) throw clientLegacyError;
 
-  // 4) Caso especial do hub: se o cliente tem instance_name = "TrataTudo bot"
-  //    e a mensagem entrou pelo hub, aceita
-  if (instanceName === 'TrataTudo bot' && clientInstance === 'TrataTudo bot') {
-    return clientId;
-  }
-
-  return null;
+  return clientLegacy?.id ?? null;
 }
 
-export async function POST(req: Request) {
+export async function POST(request: Request) {
   try {
-    if (!checkRelaySecret(req)) {
-      return NextResponse.json({ ok: false, error: 'forbidden' }, { status: 403 });
+    const body = await request.json();
+    console.log('Evolution Webhook Received:', JSON.stringify(body, null, 2));
+
+    if (body.event !== 'messages.upsert') {
+      return NextResponse.json({ ok: true, message: 'Ignored event type' });
     }
 
-    const body = await req.json();
-
-    const event = safeStr(body?.event);
-    const instanceName = safeStr(body?.instance);
-
-    if (event !== 'messages.upsert' || !instanceName) {
-      return NextResponse.json({ ok: true, ignored: true });
+    const message = body.data?.message;
+    if (!message || message.fromMe) {
+      return NextResponse.json({ ok: true, message: 'Ignored self message or empty' });
     }
 
-    const key = body?.data?.key || {};
-    const fromMe = !!key?.fromMe;
-
-    if (fromMe) {
-      return NextResponse.json({ ok: true, ignored: true, reason: 'from_me' });
-    }
-
-    const remoteJid = safeStr(key?.remoteJid);
-    const fromPhoneE164 = jidToE164(remoteJid);
-
+    const instanceName = body.instance;
+    const rawSenderPhone = body.data?.key?.remoteJid?.split('@')[0];
     const text =
-      safeStr(body?.data?.message?.conversation) ||
-      safeStr(body?.data?.message?.extendedTextMessage?.text) ||
-      safeStr(body?.data?.message?.imageMessage?.caption) ||
-      safeStr(body?.data?.message?.videoMessage?.caption);
+      message.conversation ||
+      message.extendedTextMessage?.text ||
+      '';
 
-    const pushName = safeStr(body?.data?.pushName || '');
-
-    if (!fromPhoneE164 || !text) {
-      return NextResponse.json({ ok: true, handled: false, reason: 'missing_phone_or_text' });
+    if (!instanceName || !rawSenderPhone || !text) {
+      return NextResponse.json({ ok: true, message: 'Missing instance, sender or text' });
     }
 
-    const supabase = createClient();
+    const senderPhone = normalizeE164(rawSenderPhone) || rawSenderPhone;
+    const supabase = createAdminClient();
 
-    // Resolver cliente corretamente pelo número + instância ativa
-    const client_id = await resolveClientIdForHubOrInstance(supabase, instanceName, fromPhoneE164);
+    const clientId = await resolveClientIdForHubOrInstance(
+      supabase,
+      instanceName,
+      senderPhone
+    );
 
-    if (!client_id) {
-      return NextResponse.json({
-        ok: true,
-        handled: false,
-        reason: 'client_not_found',
-        instance: instanceName,
-        phone_e164: fromPhoneE164,
-      });
+    if (!clientId) {
+      console.error(`Client not found for instance=${instanceName} sender=${senderPhone}`);
+      return NextResponse.json({ error: 'Client not found' }, { status: 404 });
     }
 
-    // Chamar bot/reply
-    const baseUrl = safeStr(process.env.NEXT_PUBLIC_BASE_URL) || new URL(req.url).origin;
-    const botUrl = `${baseUrl}/api/bot/reply`;
+    const { data: client, error: clientError } = await supabase
+      .from('clients')
+      .select('id, bot_instructions')
+      .eq('id', clientId)
+      .single();
 
-    const apiKey = safeStr(process.env.TRATATUDO_API_KEY);
-    if (!apiKey) {
-      return NextResponse.json({
-        ok: true,
-        handled: false,
-        reason: 'missing_TRATATUDO_API_KEY',
-        client_id,
-        phone_e164: fromPhoneE164,
-      });
+    if (clientError || !client) {
+      return NextResponse.json({ error: 'Client not found after resolution' }, { status: 404 });
     }
 
-    const botRes = await fetch(botUrl, {
+    await supabase.from('wa_messages').insert({
+      client_id: client.id,
+      phone_e164: senderPhone,
+      instance: instanceName,
+      direction: 'in',
+      text,
+      raw: body,
+      created_at: new Date().toISOString(),
+    });
+
+    const groqRes = await fetch(`${process.env.APP_URL}/api/groq/chat`, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-TrataTudo-Key': apiKey,
-      },
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        client_id,
-        phone_e164: fromPhoneE164,
-        push_name: pushName,
-        text,
+        message: text,
+        systemPrompt: client.bot_instructions,
+        phone: senderPhone,
+        client_id: client.id,
+        instance: instanceName,
       }),
     });
 
-    const botRaw = await botRes.text();
-    let botJson: any = null;
-
-    try {
-      botJson = JSON.parse(botRaw);
-    } catch {}
-
-    const reply = safeStr(botJson?.data?.reply);
-
-    if (!botRes.ok || !reply) {
-      return NextResponse.json({
-        ok: true,
-        handled: false,
-        reason: 'bot_no_reply',
-        client_id,
-        phone_e164: fromPhoneE164,
-        bot_status: botRes.status,
-        bot_ok: botRes.ok,
-        bot_raw_preview: botRaw.slice(0, 180),
-      });
+    if (!groqRes.ok) {
+      throw new Error('Erro ao chamar Groq');
     }
 
-    // Enviar reply pela mesma instância que recebeu
-    const evo = await sendEvolutionText(instanceName, fromPhoneE164, reply);
+    const groqData = await groqRes.json();
+    const aiResponse = groqData.text;
 
-    return NextResponse.json({
-      ok: true,
-      handled: true,
-      client_id,
-      phone_e164: fromPhoneE164,
-      reply_preview: reply.slice(0, 160),
-      evolution_send_ok: evo.ok,
-      evolution_status: evo.status,
-      evolution_raw_preview: safeStr(evo.raw).slice(0, 220),
+    const evoUrl = process.env.EVOLUTION_API_URL;
+    const evoKey = process.env.EVOLUTION_API_KEY;
+
+    await fetch(`${evoUrl}/message/sendText/${encodeURIComponent(instanceName)}`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        apikey: evoKey!,
+      },
+      body: JSON.stringify({
+        number: senderPhone.replace('+', ''),
+        text: aiResponse,
+        delay: 1000,
+      }),
     });
-  } catch (err: any) {
-    return NextResponse.json(
-      { ok: false, error: err?.message || 'internal_error' },
-      { status: 500 }
-    );
+
+    await supabase.from('wa_messages').insert({
+      client_id: client.id,
+      phone_e164: senderPhone,
+      instance: instanceName,
+      direction: 'out',
+      text: aiResponse,
+      raw: { generated: true },
+      created_at: new Date().toISOString(),
+    });
+
+    return NextResponse.json({ ok: true, client_id: client.id });
+  } catch (error: any) {
+    console.error('Webhook Error:', error);
+    return NextResponse.json({ error: error.message }, { status: 500 });
   }
 }
