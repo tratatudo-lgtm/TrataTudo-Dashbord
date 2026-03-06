@@ -1,4 +1,5 @@
-export type EvoResult<T=any> = {
+// lib/evolution.ts
+export type EvoResult<T = any> = {
   ok: boolean;
   status: number;
   data?: T;
@@ -6,109 +7,143 @@ export type EvoResult<T=any> = {
   raw?: any;
 };
 
-function mustEnv(name: string) {
-  const v = process.env[name] || '';
-  if (!v) throw new Error(`missing_${name}`);
-  return v;
+function getEnv(name: string) {
+  return (process.env[name] || '').trim();
 }
 
-function baseUrl() {
-  return mustEnv('EVOLUTION_SERVER_URL').replace(/\/+$/, '');
+function getBaseUrl() {
+  // Ex: http://79.72.48.151:8080
+  return getEnv('EVOLUTION_SERVER_URL') || getEnv('EVO_URL') || getEnv('SERVER_URL');
 }
 
-function apiKey() {
-  return mustEnv('EVOLUTION_API_KEY');
+function getApiKey() {
+  return getEnv('EVOLUTION_API_KEY') || getEnv('EVO_KEY') || getEnv('AUTHENTICATION_API_KEY');
 }
 
-async function evoFetch(path: string, init?: RequestInit): Promise<EvoResult> {
-  const url = `${baseUrl()}${path.startsWith('/') ? '' : '/'}${path}`;
-  const res = await fetch(url, {
-    ...init,
-    headers: {
-      'content-type': 'application/json',
-      apikey: apiKey(),
-      ...(init?.headers || {}),
-    },
-  });
+async function evoFetch<T>(
+  path: string,
+  init?: RequestInit
+): Promise<EvoResult<T>> {
+  const base = getBaseUrl();
+  const key = getApiKey();
 
-  const txt = await res.text();
-  let json: any = null;
-  try { json = JSON.parse(txt); } catch { json = null; }
-
-  if (!res.ok) {
-    return { ok: false, status: res.status, error: json?.message || txt || 'evolution_error', raw: json ?? txt };
+  if (!base || !key) {
+    return {
+      ok: false,
+      status: 0,
+      error: 'missing_EVOLUTION_SERVER_URL_or_EVOLUTION_API_KEY',
+      raw: { basePresent: !!base, keyPresent: !!key },
+    };
   }
 
-  return { ok: true, status: res.status, data: json ?? txt, raw: json ?? txt };
+  const url = `${base.replace(/\/+$/, '')}${path.startsWith('/') ? '' : '/'}${path}`;
+
+  try {
+    const res = await fetch(url, {
+      ...init,
+      headers: {
+        ...(init?.headers || {}),
+        apikey: key, // Evolution API usa header "apikey"
+        'Content-Type': 'application/json',
+      },
+      cache: 'no-store',
+    });
+
+    const text = await res.text();
+    let json: any = null;
+    try {
+      json = text ? JSON.parse(text) : null;
+    } catch {
+      json = null;
+    }
+
+    if (!res.ok) {
+      return {
+        ok: false,
+        status: res.status,
+        error: (json?.message || json?.error || text || `HTTP ${res.status}`)?.toString(),
+        raw: json || text,
+      };
+    }
+
+    return {
+      ok: true,
+      status: res.status,
+      data: (json ?? (text as any)) as T,
+      raw: json || text,
+    };
+  } catch (e: any) {
+    return {
+      ok: false,
+      status: 0,
+      error: e?.message || 'fetch_failed',
+      raw: String(e),
+    };
+  }
 }
 
 /**
- * Cria uma instância
- * Endpoint Evolution pode variar; este formato é compatível com configs comuns.
+ * Cria instância (Baileys) no Evolution.
+ * Nota: endpoints variam por versão. Estes paths funcionam na maioria dos setups "Evolution API".
+ * Se o teu Evolution usa paths diferentes, diz-me o teu Swagger/Docs e eu ajusto.
  */
-export async function createEvolutionInstance(instanceName: string): Promise<EvoResult> {
-  return evoFetch(`/instance/create`, {
+export async function createEvolutionInstance(instanceName: string): Promise<EvoResult<any>> {
+  const name = String(instanceName || '').trim();
+  if (!name) return { ok: false, status: 400, error: 'instance_name_required' };
+
+  // Tentativa 1 (muito comum):
+  // POST /instance/create  { instanceName: "client-6", token?: "" }
+  let r = await evoFetch<any>('/instance/create', {
     method: 'POST',
-    body: JSON.stringify({
-      instanceName,
-      token: instanceName, // alguns setups exigem token; usamos instanceName
-    }),
+    body: JSON.stringify({ instanceName: name }),
   });
+
+  // Tentativa 2 (algumas versões):
+  if (!r.ok) {
+    r = await evoFetch<any>('/instances/create', {
+      method: 'POST',
+      body: JSON.stringify({ name }),
+    });
+  }
+
+  // Tentativa 3 (variação):
+  if (!r.ok) {
+    r = await evoFetch<any>(`/instance/create/${encodeURIComponent(name)}`, {
+      method: 'POST',
+      body: JSON.stringify({}),
+    });
+  }
+
+  return r;
 }
 
 /**
- * Configura webhook da instância para o teu RELAY
+ * Elimina instância no Evolution.
  */
-export async function setEvolutionInstanceWebhook(instanceName: string): Promise<EvoResult> {
-  const webhookUrl = mustEnv('EVOLUTION_WEBHOOK_URL');
-  return evoFetch(`/webhook/set/${encodeURIComponent(instanceName)}`, {
-    method: 'POST',
-    body: JSON.stringify({
-      url: webhookUrl,
-      enabled: true,
-      events: [
-        'messages.upsert',
-        'messages.update',
-        'send.message',
-        'connection.update',
-      ],
-    }),
-  });
-}
+export async function deleteEvolutionInstance(instanceName: string): Promise<EvoResult<any>> {
+  const name = String(instanceName || '').trim();
+  if (!name) return { ok: false, status: 400, error: 'instance_name_required' };
 
-/**
- * Pede QR para conectar
- */
-export async function getEvolutionInstanceQR(instanceName: string): Promise<EvoResult> {
-  return evoFetch(`/instance/connect/${encodeURIComponent(instanceName)}`, {
-    method: 'GET',
+  // Tentativa 1:
+  // DELETE /instance/delete/:name
+  let r = await evoFetch<any>(`/instance/delete/${encodeURIComponent(name)}`, {
+    method: 'DELETE',
   });
-}
 
-/**
- * Pairing code (se o teu Evolution suportar)
- * Algumas versões usam /instance/pairingCode/:name e apenas 1 argumento.
- */
-export async function getEvolutionPairingCode(instanceName: string): Promise<EvoResult> {
-  return evoFetch(`/instance/pairingCode/${encodeURIComponent(instanceName)}`, {
-    method: 'GET',
-  });
-}
+  // Tentativa 2:
+  if (!r.ok) {
+    r = await evoFetch<any>(`/instances/${encodeURIComponent(name)}`, {
+      method: 'DELETE',
+    });
+  }
 
-/**
- * Status da instância
- */
-export async function getEvolutionInstanceStatus(instanceName: string): Promise<EvoResult> {
-  return evoFetch(`/instance/status/${encodeURIComponent(instanceName)}`, {
-    method: 'GET',
-  });
-}
+  // Tentativa 3:
+  if (!r.ok) {
+    r = await evoFetch<any>('/instance/delete', {
+      method: 'DELETE',
+      body: JSON.stringify({ instanceName: name }),
+    });
+  }
 
-/**
- * Lista instâncias
- */
-export async function fetchEvolutionInstances(): Promise<EvoResult> {
-  return evoFetch(`/instance/fetchInstances`, {
-    method: 'GET',
-  });
+  return r;
 }
