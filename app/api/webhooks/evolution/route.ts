@@ -10,14 +10,12 @@ function safeStr(v: any) {
 }
 
 function jidToE164(jid: string): string {
-  // "351937230116@s.whatsapp.net" -> "+351937230116"
   const raw = safeStr(jid).split('@')[0].replace(/[^\d]/g, '');
   if (!raw) return '';
-  return raw.startsWith('00') ? `+${raw.slice(2)}` : raw.startsWith('0') ? raw : `+${raw}`;
+  return raw.startsWith('00') ? `+${raw.slice(2)}` : raw.startsWith('+') ? raw : `+${raw}`;
 }
 
 function e164ToEvolutionNumber(e164: string): string {
-  // "+351937..." -> "351937..."
   return safeStr(e164).replace(/[^\d]/g, '');
 }
 
@@ -25,13 +23,23 @@ function checkRelaySecret(req: Request): boolean {
   const url = new URL(req.url);
   const got = safeStr(url.searchParams.get('s'));
   const expected = safeStr(process.env.RELAY_SECRET || process.env.WA_RELAY_SECRET);
-  if (!expected) return true; // se não definires secret, não bloqueia
+  if (!expected) return true;
   return got === expected;
 }
 
 async function sendEvolutionText(instanceName: string, toE164: string, text: string) {
-  const serverUrl = safeStr(process.env.EVOLUTION_SERVER_URL);
-  const apiKey = safeStr(process.env.EVOLUTION_API_KEY);
+  const serverUrl = safeStr(
+    process.env.EVOLUTION_SERVER_URL ||
+    process.env.EVOLUTION_API_URL ||
+    process.env.EVO_URL ||
+    process.env.SERVER_URL
+  );
+
+  const apiKey = safeStr(
+    process.env.EVOLUTION_API_KEY ||
+    process.env.EVO_KEY ||
+    process.env.AUTHENTICATION_API_KEY
+  );
 
   if (!serverUrl || !apiKey) {
     return {
@@ -64,37 +72,45 @@ async function resolveClientIdForHubOrInstance(
   instanceName: string,
   fromPhoneE164: string
 ): Promise<number | null> {
-  // ✅ HUB: resolve por (instance + phone_e164) — é exatamente o que tu queres para testes
-  // Ex: instance="TrataTudo bot" e phone="+351965..." -> client 7
-  const { data: hubMatch } = await supabase
+  // 1) Primeiro: encontrar o cliente pelo número
+  const { data: clientRows } = await supabase
     .from('clients')
-    .select('id')
-    .eq('instance_name', instanceName)
+    .select('id, phone_e164, instance_name, production_instance_name')
     .eq('phone_e164', fromPhoneE164)
     .limit(1);
 
-  if (hubMatch?.[0]?.id) return Number(hubMatch[0].id);
+  const client = clientRows?.[0];
+  if (!client?.id) return null;
 
-  // ✅ fallback: resolve por instância (produção / dedicada)
-  const { data: instMatch } = await supabase
-    .from('clients')
-    .select('id')
-    .or(`instance_name.eq.${instanceName},production_instance_name.eq.${instanceName}`)
-    .order('id', { ascending: true })
-    .limit(1);
+  const clientId = Number(client.id);
 
-  if (instMatch?.[0]?.id) return Number(instMatch[0].id);
-
-  // ✅ fallback extra: client_instances (se tu usares isso em algum fluxo)
-  const { data: ciMatch } = await supabase
+  // 2) Verificar se este cliente tem esta instância ativa em client_instances
+  const { data: activeMatch } = await supabase
     .from('client_instances')
-    .select('client_id')
+    .select('client_id, instance_name, status')
+    .eq('client_id', clientId)
     .eq('instance_name', instanceName)
     .eq('status', 'active')
-    .order('created_at', { ascending: false })
     .limit(1);
 
-  if (ciMatch?.[0]?.client_id) return Number(ciMatch[0].client_id);
+  if (activeMatch?.[0]?.client_id) {
+    return clientId;
+  }
+
+  // 3) Fallback: comparar com os campos do cliente
+  //    útil se client_instances ainda não estiver sincronizado
+  const clientInstance = safeStr(client.instance_name);
+  const productionInstance = safeStr(client.production_instance_name);
+
+  if (clientInstance === instanceName || productionInstance === instanceName) {
+    return clientId;
+  }
+
+  // 4) Caso especial do hub: se o cliente tem instance_name = "TrataTudo bot"
+  //    e a mensagem entrou pelo hub, aceita
+  if (instanceName === 'TrataTudo bot' && clientInstance === 'TrataTudo bot') {
+    return clientId;
+  }
 
   return null;
 }
@@ -110,13 +126,13 @@ export async function POST(req: Request) {
     const event = safeStr(body?.event);
     const instanceName = safeStr(body?.instance);
 
-    // Só tratamos mensagens inbound
     if (event !== 'messages.upsert' || !instanceName) {
       return NextResponse.json({ ok: true, ignored: true });
     }
 
     const key = body?.data?.key || {};
     const fromMe = !!key?.fromMe;
+
     if (fromMe) {
       return NextResponse.json({ ok: true, ignored: true, reason: 'from_me' });
     }
@@ -138,8 +154,9 @@ export async function POST(req: Request) {
 
     const supabase = createClient();
 
-    // ✅ Resolve client_id corretamente
+    // Resolver cliente corretamente pelo número + instância ativa
     const client_id = await resolveClientIdForHubOrInstance(supabase, instanceName, fromPhoneE164);
+
     if (!client_id) {
       return NextResponse.json({
         ok: true,
@@ -150,7 +167,7 @@ export async function POST(req: Request) {
       });
     }
 
-    // ✅ Chamar bot/reply (server-to-server)
+    // Chamar bot/reply
     const baseUrl = safeStr(process.env.NEXT_PUBLIC_BASE_URL) || new URL(req.url).origin;
     const botUrl = `${baseUrl}/api/bot/reply`;
 
@@ -181,6 +198,7 @@ export async function POST(req: Request) {
 
     const botRaw = await botRes.text();
     let botJson: any = null;
+
     try {
       botJson = JSON.parse(botRaw);
     } catch {}
@@ -200,7 +218,7 @@ export async function POST(req: Request) {
       });
     }
 
-    // ✅ Enviar de volta para WhatsApp via Evolution
+    // Enviar reply pela mesma instância que recebeu
     const evo = await sendEvolutionText(instanceName, fromPhoneE164, reply);
 
     return NextResponse.json({
@@ -214,6 +232,9 @@ export async function POST(req: Request) {
       evolution_raw_preview: safeStr(evo.raw).slice(0, 220),
     });
   } catch (err: any) {
-    return NextResponse.json({ ok: false, error: err?.message || 'internal_error' }, { status: 500 });
+    return NextResponse.json(
+      { ok: false, error: err?.message || 'internal_error' },
+      { status: 500 }
+    );
   }
 }
