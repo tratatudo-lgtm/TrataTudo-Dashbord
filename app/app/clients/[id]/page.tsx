@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import {
   Calendar,
   Bot,
@@ -19,6 +19,9 @@ import {
   Clock,
   ShieldCheck,
   Smartphone,
+  Globe,
+  Trash2,
+  PlusCircle,
 } from 'lucide-react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
@@ -53,6 +56,14 @@ function daysBetween(a: Date, b: Date) {
   return Math.ceil(ms / (1000 * 60 * 60 * 24));
 }
 
+function normalizeHostsCsv(csv: string) {
+  return (csv || '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean)
+    .join(', ');
+}
+
 export default function ClientDetailsPage({ params }: { params: { id: string } }) {
   const router = useRouter();
 
@@ -64,7 +75,6 @@ export default function ClientDetailsPage({ params }: { params: { id: string } }
 
   const [generatingPrompt, setGeneratingPrompt] = useState(false);
   const [sendingTest, setSendingTest] = useState(false);
-  const [subscribing, setSubscribing] = useState(false);
 
   const [testResult, setTestResult] = useState<{ success: boolean; message: string; log?: any } | null>(null);
 
@@ -72,6 +82,18 @@ export default function ClientDetailsPage({ params }: { params: { id: string } }
   const [hint, setHint] = useState<string | undefined>(undefined);
 
   const [isProductionModalOpen, setIsProductionModalOpen] = useState(false);
+
+  // ✅ NOVO: Pesquisa Web / allowlist
+  const [webEnabled, setWebEnabled] = useState(false);
+  const [webHostsCsv, setWebHostsCsv] = useState('');
+  const [webSaving, setWebSaving] = useState(false);
+  const [webMsg, setWebMsg] = useState<string | null>(null);
+
+  // ✅ NOVO: Instâncias
+  const [instanceBusy, setInstanceBusy] = useState(false);
+  const [instanceMsg, setInstanceMsg] = useState<string | null>(null);
+
+  const normalizedHostsPreview = useMemo(() => normalizeHostsCsv(webHostsCsv), [webHostsCsv]);
 
   // endpoint principal
   const endpoint = `/api/admin/clients/${params.id}`;
@@ -161,6 +183,11 @@ export default function ClientDetailsPage({ params }: { params: { id: string } }
         } else {
           setForcePTPT(false);
         }
+
+        // ✅ NOVO: carregar configs de web search
+        const enabled = Boolean(clientData?.web_policy?.enabled);
+        setWebEnabled(enabled);
+        setWebHostsCsv(clientData.web_allow_hosts || '');
 
         fetchMessages(clientData.phone_e164 || clientData.phone);
       }
@@ -274,7 +301,6 @@ export default function ClientDetailsPage({ params }: { params: { id: string } }
   };
 
   const handleRenew30Days = async () => {
-    // se já tiver trialEnd válido e ainda no futuro, renova a partir de lá; senão a partir de hoje
     const now = new Date();
     let base = now;
 
@@ -302,7 +328,6 @@ export default function ClientDetailsPage({ params }: { params: { id: string } }
 
     setGeneratingPrompt(true);
     try {
-      // Preferência: usar o teu endpoint /api/places/lookup (já tens) + /api/bot/draft
       const lookupRes = await fetch('/api/places/lookup', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -318,7 +343,6 @@ export default function ClientDetailsPage({ params }: { params: { id: string } }
       }
       if (!lookupRes.ok || !lookup.ok) throw new Error(lookup.error || 'Falha ao analisar o Google Maps.');
 
-      // gerar prompt (não grava ainda)
       const draftRes = await fetch('/api/bot/draft', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -383,6 +407,140 @@ export default function ClientDetailsPage({ params }: { params: { id: string } }
     }
   };
 
+  // ✅ NOVO: Guardar/limpar allowlist (pesquisa web)
+  const handleSaveWebSettings = async () => {
+    setWebSaving(true);
+    setWebMsg(null);
+    try {
+      const res = await fetch('/api/admin/web-allowlist', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          client_id: Number(params.id),
+          enabled: Boolean(webEnabled),
+          hosts_csv: normalizedHostsPreview,
+        }),
+      });
+      const t = await res.text();
+      let j: any = {};
+      try {
+        j = JSON.parse(t);
+      } catch {
+        j = { ok: false, error: t?.slice(0, 200) };
+      }
+      if (!res.ok || !j.ok) throw new Error(j.error || 'Falha ao guardar');
+
+      setWebMsg('Guardado ✅');
+      await fetchData();
+      setTimeout(() => setWebMsg(null), 2500);
+    } catch (e: any) {
+      setWebMsg(`Erro: ${e?.message || 'falhou'}`);
+    } finally {
+      setWebSaving(false);
+    }
+  };
+
+  const handleClearWebSettings = async () => {
+    setWebSaving(true);
+    setWebMsg(null);
+    try {
+      const res = await fetch('/api/admin/web-allowlist', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          client_id: Number(params.id),
+          enabled: false,
+          hosts: [],
+        }),
+      });
+      const t = await res.text();
+      let j: any = {};
+      try {
+        j = JSON.parse(t);
+      } catch {
+        j = { ok: false, error: t?.slice(0, 200) };
+      }
+      if (!res.ok || !j.ok) throw new Error(j.error || 'Falha ao limpar');
+
+      setWebEnabled(false);
+      setWebHostsCsv('');
+      setWebMsg('Limpo ✅');
+      await fetchData();
+      setTimeout(() => setWebMsg(null), 2500);
+    } catch (e: any) {
+      setWebMsg(`Erro: ${e?.message || 'falhou'}`);
+    } finally {
+      setWebSaving(false);
+    }
+  };
+
+  // ✅ NOVO: Instâncias dedicadas (create/delete)
+  const handleCreateDedicatedInstance = async () => {
+    setInstanceBusy(true);
+    setInstanceMsg(null);
+    try {
+      const res = await fetch('/api/admin/evolution/instances/create', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ client_id: Number(params.id) }),
+      });
+      const t = await res.text();
+      let j: any = {};
+      try {
+        j = JSON.parse(t);
+      } catch {
+        j = { ok: false, error: t?.slice(0, 200) };
+      }
+      if (!res.ok || !j.ok) throw new Error(j.error || 'Falha ao criar instância');
+
+      const createdName = j?.data?.instance_name || `client-${params.id}`;
+      setInstanceMsg(`Instância criada ✅ (${createdName})`);
+      await fetchData();
+      setTimeout(() => setInstanceMsg(null), 3500);
+    } catch (e: any) {
+      setInstanceMsg(`Erro: ${e?.message || 'falhou'}`);
+    } finally {
+      setInstanceBusy(false);
+    }
+  };
+
+  const handleDeleteInstance = async () => {
+    const defaultName = productionInstanceName || `client-${params.id}`;
+    const name = prompt(
+      `Confirma o nome da instância a ELIMINAR.\n\nATENÇÃO: isto apaga mesmo no Evolution.\n\nEx: ${defaultName}`,
+      defaultName
+    );
+    if (!name) return;
+
+    if (!confirm(`Tens a certeza que queres ELIMINAR a instância "${name}"?`)) return;
+
+    setInstanceBusy(true);
+    setInstanceMsg(null);
+    try {
+      const res = await fetch('/api/admin/evolution/instances/delete', {
+        method: 'DELETE',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ client_id: Number(params.id), instance_name: name }),
+      });
+      const t = await res.text();
+      let j: any = {};
+      try {
+        j = JSON.parse(t);
+      } catch {
+        j = { ok: false, error: t?.slice(0, 200) };
+      }
+      if (!res.ok || !j.ok) throw new Error(j.error || 'Falha ao eliminar instância');
+
+      setInstanceMsg(`Instância eliminada ✅ (${name})`);
+      await fetchData();
+      setTimeout(() => setInstanceMsg(null), 3500);
+    } catch (e: any) {
+      setInstanceMsg(`Erro: ${e?.message || 'falhou'}`);
+    } finally {
+      setInstanceBusy(false);
+    }
+  };
+
   // UI helpers: validade
   const now = new Date();
   const endDate = trialEnd ? new Date(trialEnd) : null;
@@ -425,7 +583,8 @@ export default function ClientDetailsPage({ params }: { params: { id: string } }
             {hasEnd && (
               <>
                 {' '}
-                • <span className={isExpiredByDate ? 'text-rose-600 font-bold' : 'text-slate-600'}>
+                •{' '}
+                <span className={isExpiredByDate ? 'text-rose-600 font-bold' : 'text-slate-600'}>
                   {isExpiredByDate ? 'Expirado' : `Validade: ${trialEnd}`}
                 </span>
                 {remainingDays !== null && !isExpiredByDate && (
@@ -469,7 +628,6 @@ export default function ClientDetailsPage({ params }: { params: { id: string } }
               </h2>
 
               <div className="flex flex-wrap gap-2 justify-end">
-                {/* Botões de serviço */}
                 <button
                   onClick={handleActivate30Days}
                   className="flex items-center gap-2 px-3 py-1.5 text-xs font-bold text-white bg-emerald-600 rounded-lg hover:bg-emerald-700 transition shadow-sm"
@@ -512,7 +670,13 @@ export default function ClientDetailsPage({ params }: { params: { id: string } }
                   disabled={saving}
                   className="flex items-center gap-2 px-3 py-1.5 text-xs font-bold text-white bg-slate-900 rounded-lg hover:bg-slate-800 transition disabled:opacity-50 shadow-sm"
                 >
-                  {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : savedFeedback === 'data' ? <Check className="h-4 w-4" /> : <Save className="h-4 w-4" />}
+                  {saving ? (
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                  ) : savedFeedback === 'data' ? (
+                    <Check className="h-4 w-4" />
+                  ) : (
+                    <Save className="h-4 w-4" />
+                  )}
                   {savedFeedback === 'data' ? 'Guardado' : 'Guardar Dados'}
                 </button>
               </div>
@@ -611,11 +775,7 @@ export default function ClientDetailsPage({ params }: { params: { id: string } }
 
               <div className="flex items-center gap-3">
                 <label className="flex items-center gap-2 text-xs font-bold text-slate-600">
-                  <input
-                    checked={forcePTPT}
-                    onChange={(e) => setForcePTPT(e.target.checked)}
-                    type="checkbox"
-                  />
+                  <input checked={forcePTPT} onChange={(e) => setForcePTPT(e.target.checked)} type="checkbox" />
                   Forçar PT-PT
                 </label>
 
@@ -624,7 +784,13 @@ export default function ClientDetailsPage({ params }: { params: { id: string } }
                   disabled={saving}
                   className="flex items-center gap-2 px-4 py-1.5 text-sm font-bold text-white bg-slate-900 rounded-lg hover:bg-slate-800 transition disabled:opacity-50 shadow-sm"
                 >
-                  {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : savedFeedback === 'prompt' ? <Check className="h-4 w-4" /> : <Save className="h-4 w-4" />}
+                  {saving ? (
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                  ) : savedFeedback === 'prompt' ? (
+                    <Check className="h-4 w-4" />
+                  ) : (
+                    <Save className="h-4 w-4" />
+                  )}
                   {savedFeedback === 'prompt' ? 'Guardado' : 'Guardar Prompt'}
                 </button>
               </div>
@@ -737,6 +903,114 @@ export default function ClientDetailsPage({ params }: { params: { id: string } }
 
         {/* Right Column */}
         <div className="space-y-8">
+          {/* ✅ NOVO: Pesquisa Web (Allowlist) */}
+          <section className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+            <div className="p-6 border-b border-slate-100">
+              <h2 className="text-lg font-bold text-slate-900 flex items-center gap-2">
+                <Globe className="h-5 w-5 text-sky-600" />
+                Pesquisa Web
+              </h2>
+            </div>
+
+            <div className="p-6 space-y-4">
+              <p className="text-xs text-slate-500 leading-relaxed">
+                Se não definires domínios, o bot pode pesquisar (modo geral). Se definires, fica limitado à allowlist.
+              </p>
+
+              <label className="flex items-center gap-2 text-xs font-bold text-slate-700">
+                <input checked={webEnabled} onChange={(e) => setWebEnabled(e.target.checked)} type="checkbox" disabled={webSaving} />
+                Ativar pesquisa web
+              </label>
+
+              <div className="space-y-2">
+                <label className="block text-xs font-bold text-slate-500 uppercase tracking-wider">
+                  Domínios permitidos (vírgulas)
+                </label>
+                <input
+                  value={webHostsCsv}
+                  onChange={(e) => setWebHostsCsv(e.target.value)}
+                  placeholder="Ex: cm-valenca.pt, jf-vcca.pt"
+                  className="w-full rounded-lg border border-slate-300 px-4 py-2 text-sm focus:border-indigo-500 focus:ring-indigo-500 font-mono"
+                  disabled={webSaving}
+                />
+                <div className="text-[10px] text-slate-500">
+                  Preview: <span className="font-mono">{normalizedHostsPreview || '(vazio)'}</span>
+                </div>
+              </div>
+
+              <div className="flex gap-2">
+                <button
+                  onClick={handleSaveWebSettings}
+                  disabled={webSaving}
+                  className="flex-1 flex items-center justify-center gap-2 px-4 py-2.5 text-sm font-bold text-white bg-slate-900 rounded-lg hover:bg-slate-800 transition disabled:opacity-50 shadow-sm"
+                >
+                  {webSaving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
+                  Guardar
+                </button>
+                <button
+                  onClick={handleClearWebSettings}
+                  disabled={webSaving}
+                  className="flex items-center justify-center gap-2 px-4 py-2.5 text-sm font-bold rounded-lg border border-slate-200 hover:bg-slate-50 transition disabled:opacity-50"
+                >
+                  <X className="h-4 w-4" />
+                  Limpar
+                </button>
+              </div>
+
+              {webMsg && (
+                <div className="text-xs text-slate-700 bg-slate-50 border border-slate-200 rounded-xl p-3">
+                  {webMsg}
+                </div>
+              )}
+            </div>
+          </section>
+
+          {/* ✅ NOVO: Instâncias Evolution (criar / eliminar) */}
+          <section className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+            <div className="p-6 border-b border-slate-100">
+              <h2 className="text-lg font-bold text-slate-900 flex items-center gap-2">
+                <Smartphone className="h-5 w-5 text-emerald-600" />
+                Instâncias Evolution
+              </h2>
+            </div>
+
+            <div className="p-6 space-y-4">
+              <div className="text-xs text-slate-600">
+                Recomendo instância dedicada: <span className="font-mono font-bold">client-{params.id}</span>
+              </div>
+
+              <div className="text-xs text-slate-600">
+                Produção atual: <span className="font-mono font-bold">{productionInstanceName || 'N/A'}</span>
+              </div>
+
+              <div className="flex gap-2">
+                <button
+                  onClick={handleCreateDedicatedInstance}
+                  disabled={instanceBusy}
+                  className="flex-1 flex items-center justify-center gap-2 px-4 py-2.5 text-sm font-bold text-white bg-emerald-600 rounded-lg hover:bg-emerald-700 transition disabled:opacity-50 shadow-sm"
+                >
+                  {instanceBusy ? <Loader2 className="h-4 w-4 animate-spin" /> : <PlusCircle className="h-4 w-4" />}
+                  Criar dedicada
+                </button>
+
+                <button
+                  onClick={handleDeleteInstance}
+                  disabled={instanceBusy}
+                  className="flex items-center justify-center gap-2 px-4 py-2.5 text-sm font-bold text-white bg-rose-600 rounded-lg hover:bg-rose-700 transition disabled:opacity-50 shadow-sm"
+                  title="Elimina a instância no Evolution"
+                >
+                  <Trash2 className="h-4 w-4" />
+                </button>
+              </div>
+
+              {instanceMsg && (
+                <div className="text-xs text-slate-700 bg-slate-50 border border-slate-200 rounded-xl p-3">
+                  {instanceMsg}
+                </div>
+              )}
+            </div>
+          </section>
+
           {/* C) Gerar Prompt Automático */}
           <section className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
             <div className="p-6 border-b border-slate-100">
@@ -819,7 +1093,11 @@ export default function ClientDetailsPage({ params }: { params: { id: string } }
                   }`}
                 >
                   <div className="flex items-center gap-2 mb-2">
-                    {testResult.success ? <Check className="h-4 w-4 text-emerald-600" /> : <X className="h-4 w-4 text-rose-600" />}
+                    {testResult.success ? (
+                      <Check className="h-4 w-4 text-emerald-600" />
+                    ) : (
+                      <X className="h-4 w-4 text-rose-600" />
+                    )}
                     <span className={`text-xs font-bold ${testResult.success ? 'text-emerald-700' : 'text-rose-700'}`}>
                       {testResult.message}
                     </span>
